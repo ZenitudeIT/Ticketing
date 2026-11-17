@@ -198,6 +198,29 @@ select.input { padding-right: .4rem; }
 .res { background: var(--moss-tint); border-left: 3px solid var(--moss-soft); border-radius: var(--r); padding: .7rem .9rem; margin-top: 1rem; }
 .res b { font-family: var(--serif); font-size: 1.05rem; font-weight: 600; color: var(--moss); }
 
+/* screenshots */
+.att { border: 1px dashed var(--line-strong); border-radius: 8px; padding: .7rem .8rem; background: var(--ivory); margin-top: .6rem; transition: border-color .15s, background .15s; }
+.att.is-over { border-color: var(--gold); background: var(--gold-tint); }
+.att__row { display: flex; align-items: center; gap: .7rem; flex-wrap: wrap; }
+.att__btn { cursor: pointer; }
+.att__btn input { display: none; }
+.att__btn.is-off { opacity: .45; pointer-events: none; }
+.thumbs { display: flex; flex-wrap: wrap; gap: .5rem; margin-bottom: .6rem; }
+.thumb { position: relative; width: 92px; height: 70px; border-radius: 6px; overflow: hidden; border: 1px solid var(--line); background: #fff; }
+.thumb img { width: 100%; height: 100%; object-fit: cover; }
+.thumb__x { position: absolute; top: 3px; right: 3px; width: 22px; height: 22px; border-radius: 50%; background: rgba(15, 34, 17, .8); color: #fff; font-size: 15px; line-height: 22px; text-align: center; }
+.thumb__x:hover { background: var(--danger); }
+.gallery { display: flex; flex-wrap: wrap; gap: .5rem; padding: 0 .8rem .7rem; }
+.panel__b > .gallery { padding: .9rem 0 0; }
+.shot { width: 120px; height: 86px; border-radius: 6px; overflow: hidden; border: 1px solid var(--line); background: var(--ivory); padding: 0; transition: border-color .15s, box-shadow .15s; }
+.shot:hover { border-color: var(--gold); box-shadow: 0 0 0 3px rgba(184, 155, 94, .2); }
+.shot img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.shot__ph { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: .2rem; height: 100%; color: var(--muted); padding: .3rem; }
+.shot__ph small { font-size: .66rem; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.modal__box.modal__box--wide { width: min(1100px, 100%); }
+.viewer { display: grid; place-items: center; background: var(--ivory); min-height: 200px; }
+.viewer img { max-width: 100%; max-height: 72vh; border-radius: 4px; box-shadow: var(--shadow); }
+
 /* modal & toast */
 .modal { position: fixed; inset: 0; z-index: 100; background: rgba(15, 34, 17, .55); display: grid; place-items: center; padding: 1.5rem; }
 .modal__box { width: min(500px, 100%); background: #fff; border-radius: 12px; box-shadow: 0 40px 90px -30px rgba(0, 0, 0, .55); }
