@@ -1,9 +1,16 @@
 rules_version = '2';
 // Zenitude Desk — Firestore security rules.
-// Roles live in users/{uid}.role: 'user' (staff member raising tickets),
-// 'tech' (IT technician) or 'admin' (IT manager). The FIRST admin is made by
-// hand in the Firebase console (see README). These rules are the real security:
-// the web app only hides buttons, the rules decide what is allowed.
+//
+// People:  users/{uid}.role is 'user' (team member) or 'admin' (administrator).
+//          Older accounts may still say 'tech'; they are treated like 'user'.
+// Desks:   desks/{deskId} is a team (IT, HR, …). Its `members` list decides who
+//          can see and work on that desk's tickets. Administrators manage desks,
+//          but only see the tickets of desks they are a member of.
+// Tickets: tickets/{id}.deskId says which desk owns it.
+//
+// The main administrator account (MAIN_ADMIN) becomes admin automatically on
+// first sign-in and cannot be demoted or disabled from the app.
+// These rules are the real security: the web app only hides buttons.
 service cloud.firestore {
   match /databases/{database}/documents {
 
@@ -11,24 +18,26 @@ service cloud.firestore {
     function me() { return get(/databases/$(database)/documents/users/$(request.auth.uid)).data; }
     function hasProfile() { return signedIn() && exists(/databases/$(database)/documents/users/$(request.auth.uid)); }
     function active() { return hasProfile() && me().active == true; }
-    function isStaff() { return active() && me().role in ['tech', 'admin']; }
     function isAdmin() { return active() && me().role == 'admin'; }
     function str(v, min, max) { return v is string && v.size() >= min && v.size() <= max; }
     function roles() { return ['user', 'tech', 'admin']; }
     function statuses() { return ['Open', 'In Progress', 'On Hold', 'Resolved', 'Closed']; }
     function priorities() { return ['Low', 'Medium', 'High', 'Critical']; }
 
-    // The main IT administrator account. It becomes admin automatically on first
-    // sign-in, and nobody can demote or disable it from the app.
     function MAIN_ADMIN() { return 'it@zenitudeconcierge.com'; }
     function isMainAdmin() { return signedIn() && request.auth.token.email is string && request.auth.token.email.lower() == MAIN_ADMIN(); }
+
+    function deskPath(d) { return /databases/$(database)/documents/desks/$(d); }
+    function deskExists(d) { return d is string && exists(deskPath(d)); }
+    // Member of a desk = may see and work on its tickets.
+    function isAgentOf(d) { return active() && deskExists(d) && request.auth.uid in get(deskPath(d)).data.members; }
 
     // ---------- people ----------
     match /users/{uid} {
       // Everyone signed in can see names (needed to show who raised / works a ticket).
       allow read: if signedIn();
 
-      // Self sign-up: always an active end user, with their own sign-in email.
+      // Self sign-up: an active team member with their own sign-in email (the main admin account becomes admin).
       allow create: if signedIn() && request.auth.uid == uid
         && request.resource.data.keys().hasOnly(['name', 'email', 'role', 'active', 'createdAt'])
         && str(request.resource.data.name, 2, 80)
@@ -36,7 +45,7 @@ service cloud.firestore {
         && (request.resource.data.role == 'user' || (request.resource.data.role == 'admin' && isMainAdmin()))
         && request.resource.data.active == true;
 
-      // Admins add people with any role.
+      // Administrators add people.
       allow create: if isAdmin()
         && request.resource.data.keys().hasOnly(['name', 'email', 'role', 'active', 'createdAt'])
         && str(request.resource.data.name, 2, 80)
@@ -54,14 +63,33 @@ service cloud.firestore {
         && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['role', 'active'])
         && request.resource.data.role == 'admin' && request.resource.data.active == true;
 
-      // Admins change other people's role, name or access (never their own, so they can't lock themselves out,
-      // and never the main admin account).
+      // Administrators change other people's role, name or access (never their own, and never the main admin's).
       allow update: if isAdmin() && request.auth.uid != uid
         && resource.data.email.lower() != MAIN_ADMIN()
         && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['role', 'active', 'name'])
         && request.resource.data.role in roles()
         && request.resource.data.active is bool;
 
+      allow delete: if false;
+    }
+
+    // ---------- desks ----------
+    match /desks/{d} {
+      // Everyone signed in can see the list of desks, their form questions and who works them.
+      allow read: if signedIn();
+      // Only administrators create and change desks. Desks are closed, never deleted.
+      allow create, update: if isAdmin()
+        && request.resource.data.keys().hasOnly(['name', 'description', 'email', 'active', 'categories', 'sla', 'members', 'fields', 'order', 'log', 'updatedAt', 'updatedBy'])
+        && str(request.resource.data.name, 2, 40)
+        && request.resource.data.description is string && request.resource.data.description.size() <= 200
+        && request.resource.data.email is string && request.resource.data.email.size() <= 160
+        && request.resource.data.active is bool
+        && request.resource.data.categories is list && request.resource.data.categories.size() >= 1 && request.resource.data.categories.size() <= 40
+        && request.resource.data.sla is map
+        && request.resource.data.members is list && request.resource.data.members.size() <= 300
+        && request.resource.data.fields is list && request.resource.data.fields.size() <= 20
+        && request.resource.data.log is list && request.resource.data.log.size() <= 60
+        && request.resource.data.updatedBy == request.auth.uid;
       allow delete: if false;
     }
 
@@ -72,7 +100,7 @@ service cloud.firestore {
       allow update: if active() && request.resource.data.keys().hasOnly(['next']) && request.resource.data.next == resource.data.next + 1;
     }
 
-    // Email integration bookkeeping (Cloud Functions only; the admin SDK bypasses these rules).
+    // Email script bookkeeping (Apps Script uses a service account, which bypasses these rules).
     match /meta/mailbox { allow read, write: if false; }
     match /mailLog/{id} { allow read, write: if false; }
 
@@ -81,24 +109,32 @@ service cloud.firestore {
       function n() { return request.resource.data; }
       function o() { return resource.data; }
       function changed() { return n().diff(o()).affectedKeys(); }
+      function tk() { return get(/databases/$(database)/documents/tickets/$(tid)).data; }
+      function isRequesterOf() { return active() && tk().requesterId == request.auth.uid; }
 
-      allow read: if isStaff() || (active() && o().requesterId == request.auth.uid);
+      // Members of the ticket's desk, and the person who raised it.
+      allow read: if isAgentOf(o().deskId) || (active() && o().requesterId == request.auth.uid);
 
       allow create: if active()
-        && n().keys().hasOnly(['num', 'title', 'description', 'category', 'priority', 'status', 'requesterId', 'assigneeId',
-                               'createdAt', 'updatedAt', 'dueAt', 'resolvedAt', 'closedAt', 'resolution', 'history', 'createdBy'])
-        && (n().requesterId == request.auth.uid || isStaff())
+        && n().keys().hasOnly(['num', 'deskId', 'title', 'description', 'category', 'priority', 'status', 'requesterId', 'assigneeId',
+                               'createdAt', 'updatedAt', 'dueAt', 'resolvedAt', 'closedAt', 'resolution', 'history', 'createdBy', 'fields'])
+        && deskExists(n().deskId) && get(deskPath(n().deskId)).data.active == true
+        && (n().requesterId == request.auth.uid || isAgentOf(n().deskId))
         && n().createdBy == request.auth.uid
         && n().status == 'Open' && n().assigneeId == null
-        && str(n().title, 5, 120) && str(n().description, 10, 5000) && str(n().category, 2, 40)
+        && str(n().title, 5, 120) && str(n().description, 10, 5000) && str(n().category, 1, 40)
         && n().priority in priorities()
         && n().num is int
         && getAfter(/databases/$(database)/documents/meta/counter).data.next == n().num + 1
-        && n().history.size() == 1;
+        && n().history.size() == 1
+        && (!('fields' in n()) || (n().fields is list && n().fields.size() <= 20));
 
-      // IT staff: work the ticket. Who raised it, its number and creation time never change.
-      allow update: if isStaff()
+      // Desk members work the ticket, and may move it to another desk. Who raised it,
+      // its number, creation time and form answers never change.
+      allow update: if isAgentOf(o().deskId)
         && n().requesterId == o().requesterId && n().num == o().num && n().createdAt == o().createdAt
+        && n().get('fields', null) == o().get('fields', null)
+        && deskExists(n().deskId)
         && n().status in statuses() && n().priority in priorities()
         && n().history.size() >= o().history.size();
 
@@ -110,26 +146,54 @@ service cloud.firestore {
         && ( (n().status == o().status && changed().hasOnly(['updatedAt']))
           || (o().status == 'Resolved' && n().status in ['Closed', 'In Progress']) );
 
-      allow delete: if isAdmin();
+      // Administrators may delete tickets of desks they belong to.
+      allow delete: if isAdmin() && isAgentOf(o().deskId);
 
       // ---------- comments & internal notes ----------
       match /comments/{cid} {
-        function ticket() { return get(/databases/$(database)/documents/tickets/$(tid)).data; }
-
-        // Internal notes are only ever readable by IT staff.
-        allow read: if isStaff()
-          || (active() && ticket().requesterId == request.auth.uid && resource.data.internal == false);
+        // Internal notes are only readable by members of the ticket's desk.
+        allow read: if isAgentOf(tk().deskId)
+          || (isRequesterOf() && resource.data.internal == false);
 
         allow create: if active()
-          && request.resource.data.keys().hasOnly(['by', 'at', 'text', 'internal', 'resolution'])
+          && request.resource.data.keys().hasOnly(['by', 'at', 'text', 'internal', 'resolution', 'files'])
+          && (!('files' in request.resource.data) || (request.resource.data.files is list && request.resource.data.files.size() <= 5))
           && request.resource.data.by == request.auth.uid
           && str(request.resource.data.text, 1, 4000)
           && request.resource.data.internal is bool
-          && ( isStaff()
-            || (ticket().requesterId == request.auth.uid && request.resource.data.internal == false && ticket().status != 'Closed') );
+          && ( isAgentOf(tk().deskId)
+            || (isRequesterOf() && request.resource.data.internal == false && tk().status != 'Closed') );
 
         allow update: if false;
-        allow delete: if isAdmin();
+        allow delete: if isAdmin() && isAgentOf(tk().deskId);
+      }
+
+      // ---------- screenshots ----------
+      // files/{fid}: name + small preview. files/{fid}/content/full: the image itself (max ~1 MB).
+      match /files/{fid} {
+        allow read: if isAgentOf(tk().deskId) || (isRequesterOf() && resource.data.internal == false);
+        allow create: if active()
+          && request.resource.data.keys().hasOnly(['by', 'at', 'name', 'type', 'width', 'height', 'size', 'internal', 'commentId', 'thumb'])
+          && request.resource.data.by == request.auth.uid
+          && str(request.resource.data.name, 1, 200)
+          && request.resource.data.type is string && request.resource.data.type.matches('image/.*')
+          && request.resource.data.internal is bool
+          && request.resource.data.thumb is string && request.resource.data.thumb.size() < 80000
+          && ( isAgentOf(tk().deskId)
+            || (isRequesterOf() && request.resource.data.internal == false && tk().status != 'Closed') );
+        allow update: if false;
+        allow delete: if (isAdmin() && isAgentOf(tk().deskId)) || (active() && resource.data.by == request.auth.uid);
+
+        match /content/{part} {
+          function file() { return get(/databases/$(database)/documents/tickets/$(tid)/files/$(fid)).data; }
+          allow read: if isAgentOf(tk().deskId) || (isRequesterOf() && file().internal == false);
+          allow create: if active() && part == 'full'
+            && getAfter(/databases/$(database)/documents/tickets/$(tid)/files/$(fid)).data.by == request.auth.uid
+            && request.resource.data.keys().hasOnly(['data'])
+            && request.resource.data.data is string && request.resource.data.data.size() < 1000000;
+          allow update: if false;
+          allow delete: if (isAdmin() && isAgentOf(tk().deskId)) || (active() && file().by == request.auth.uid);
+        }
       }
     }
   }

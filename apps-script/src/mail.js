@@ -25,7 +25,7 @@ function cleanSubject(subject) {
   const hadTag = /\bZEN-\d{3,7}\b/i.test(s);
   s = s.replace(/\[?\bZEN-\d{3,7}\b\]?/ig, '').replace(/\s{2,}/g, ' ').trim();
   // Drop the wording Zenitude Desk itself puts in front of the title in its emails.
-  if (hadTag) s = s.replace(/^(new ticket \(\w+\)|we've received your request|new reply from it|resolved|assigned to you \(\w+\)|reopened by [^:]{1,60}|[^:]{1,60} replied)\s*:\s*/i, '');
+  if (hadTag) s = s.replace(/^(new (?:[^:()]{1,40} )?ticket \(\w+\)|we've received your request|new reply from [^:]{1,40}|resolved|assigned to you \(\w+\)|reopened by [^:]{1,60}|[^:]{1,60} replied)\s*:\s*/i, '');
   return s.trim();
 }
 
@@ -70,7 +70,11 @@ function domainAllowed(email, allowedCsv) {
 }
 
 // Build the Firestore ticket for an email that starts a new conversation.
-function ticketFromEmail(msg, uid, num, now, followUpOf) {
+// desk: { id, sla: {Low,…}, categories: [...] } (defaults to the IT desk)
+function ticketFromEmail(msg, uid, num, now, followUpOf, desk) {
+  desk = desk || {};
+  const sla = Object.assign({}, SLA_HOURS, desk.sla || {});
+  const cats = desk.categories && desk.categories.length ? desk.categories : ['Other'];
   const fromName = (msg.from && msg.from.emailAddress && msg.from.emailAddress.name) || '';
   let title = cleanSubject(msg.subject).slice(0, 120);
   if (title.length < 5) title = ('Email from ' + (fromName || 'a colleague')).slice(0, 120);
@@ -79,9 +83,9 @@ function ticketFromEmail(msg, uid, num, now, followUpOf) {
   if (followUpOf) description = (`Follow-up to ZEN-${followUpOf}, which was already closed.\n\n` + description).slice(0, 5000);
   const priority = String(msg.importance || '').toLowerCase() === 'high' ? 'High' : 'Medium';
   return {
-    num, title, description, category: 'Other', priority, status: 'Open',
+    num, deskId: desk.id || 'it', title, description, category: cats.indexOf('Other') >= 0 ? 'Other' : cats[0], priority, status: 'Open',
     requesterId: uid, assigneeId: null, createdBy: uid,
-    createdAt: now, updatedAt: now, dueAt: now + SLA_HOURS[priority] * HOUR,
+    createdAt: now, updatedAt: now, dueAt: now + (Number(sla[priority]) || SLA_HOURS[priority]) * HOUR,
     resolvedAt: null, closedAt: null, resolution: '',
     history: [{ at: now, by: uid, text: followUpOf ? `raised the ticket by email (follow-up to ZEN-${followUpOf})` : 'raised the ticket by email' }],
     source: 'email',
@@ -90,14 +94,14 @@ function ticketFromEmail(msg, uid, num, now, followUpOf) {
 
 /* ---------- outgoing ---------- */
 
-function layout(title, bodyHtml, button, footnote) {
+function layout(title, bodyHtml, button, footnote, deskLabel) {
   return `<!DOCTYPE html><html><body style="margin:0;padding:0;background:#f8f5ef;">
 <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f8f5ef;padding:24px 12px;font-family:Segoe UI,Helvetica,Arial,sans-serif;color:#2c2a27;">
 <tr><td align="center">
 <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:600px;background:#ffffff;border:1px solid #e6dfd2;border-radius:10px;overflow:hidden;">
 <tr><td style="background:#17301a;padding:18px 28px;">
   <span style="font-family:Georgia,'Times New Roman',serif;font-size:20px;letter-spacing:4px;color:#f8f5ef;">ZENITUDE</span>
-  <span style="font-size:11px;letter-spacing:3px;color:#d8c08a;padding-left:8px;">IT SERVICE DESK</span>
+  <span style="font-size:11px;letter-spacing:3px;color:#d8c08a;padding-left:8px;">${esc(String(deskLabel || 'IT').toUpperCase())} DESK</span>
 </td></tr>
 <tr><td style="padding:26px 28px 8px;">
   <h1 style="margin:0 0 14px;font-family:Georgia,'Times New Roman',serif;font-weight:normal;font-size:24px;color:#274d24;">${title}</h1>
@@ -113,67 +117,74 @@ function facts(rows) {
   return `<table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 0 14px;font-size:14px;">${rows.map(([k, v]) =>
     `<tr><td style="padding:3px 16px 3px 0;color:#7a746b;font-size:12px;letter-spacing:1px;text-transform:uppercase;">${esc(k)}</td><td style="padding:3px 0;">${esc(v)}</td></tr>`).join('')}</table>`;
 }
-const fmt = (ms, tz) => new Date(ms).toLocaleString('en-GB', { timeZone: tz || 'Indian/Mauritius', day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' });
+const shotsNote = (n) => (n ? para(`📎 ${n} screenshot${n === 1 ? '' : 's'} attached. Open the ticket to view ${n === 1 ? 'it' : 'them'}.`) : '');
+const fmt = (ms, tz) => (typeof Utilities !== 'undefined' && Utilities.formatDate
+  ? Utilities.formatDate(new Date(ms), tz || 'Indian/Mauritius', 'dd MMM, HH:mm')   // Google Apps Script
+  : new Date(ms).toLocaleString('en-GB', { timeZone: tz || 'Indian/Mauritius', day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' }));
 
+// Every template receives { deskName } (e.g. 'IT', 'HR'); it labels the email header and wording.
 const templates = {
-  newTicketForStaff(t, { link, requesterName, tz }) {
+  newTicketForStaff(t, { link, requesterName, tz, shots, deskName }) {
+    const dn = deskName || 'IT';
     return {
-      subject: `${tag(t)} New ticket (${t.priority}): ${t.title}`,
+      subject: `${tag(t)} New ${dn} ticket (${t.priority}): ${t.title}`,
       html: layout(`New ticket ${esc(ref(t))}`,
-        para(`<b>${esc(requesterName)}</b> raised a new ticket${t.source === 'email' ? ' by email' : ''}.`) +
-        facts([['Subject', t.title], ['Priority', t.priority], ['Category', t.category], ['Target', fmt(t.dueAt, tz)]]) +
-        quote(t.description),
+        para(`<b>${esc(requesterName)}</b> raised a new ticket for the ${esc(dn)} desk${t.source === 'email' ? ' by email' : ''}.`) +
+        facts([['Subject', t.title], ['Priority', t.priority], ['Category', t.category], ['Target', fmt(t.dueAt, tz)]].concat((t.fields || []).map((x) => [x.label, x.value]))) +
+        quote(t.description) + shotsNote(shots || 0),
         { href: link, label: 'Open in Zenitude Desk' },
-        'Replying to this email posts a public reply that the requester will see.'),
+        'Replying to this email posts a public reply that the requester will see.', dn),
     };
   },
-  receivedForRequester(t, { link, firstName, appUrl }) {
+  receivedForRequester(t, { link, firstName, appUrl, deskName, slaHours }) {
+    const dn = deskName || 'IT';
     return {
       subject: `${tag(t)} We've received your request: ${t.title}`,
       html: layout('We have your request',
         para(`Hi ${esc(firstName || 'there')},`) +
-        para(`Thanks for contacting IT. Your request has reference <b>${esc(ref(t))}</b> and we aim to resolve it within <b>${SLA_HOURS[t.priority]} hours</b> (${esc(t.priority.toLowerCase())} priority).`) +
+        para(`Thanks for contacting ${esc(dn)}. Your request has reference <b>${esc(ref(t))}</b> and we aim to resolve it within <b>${slaHours || SLA_HOURS[t.priority]} hours</b> (${esc(t.priority.toLowerCase())} priority).`) +
         quote(t.description) +
         para(`To add anything, just reply to this email. You can also follow it in Zenitude Desk at <a href="${esc(appUrl)}" style="color:#274d24;">${esc(appUrl.replace(/^https?:\/\//, ''))}</a>. If it's your first time, use <i>Forgot your password?</i> with this email address to set a password.`),
-        { href: link, label: 'View your ticket' }),
+        { href: link, label: 'View your ticket' }, null, dn),
     };
   },
-  replyForRequester(t, c, { link, authorName }) {
+  replyForRequester(t, c, { link, authorName, deskName }) {
+    const dn = deskName || 'IT';
     return {
-      subject: `${tag(t)} New reply from IT: ${t.title}`,
-      html: layout(`${esc(authorName)} replied`, quote(c.text) + para('Reply to this email to answer.'), { href: link, label: 'View the conversation' }),
+      subject: `${tag(t)} New reply from ${dn}: ${t.title}`,
+      html: layout(`${esc(authorName)} replied`, quote(c.text) + shotsNote((c.files || []).length) + para('Reply to this email to answer.'), { href: link, label: 'View the conversation' }, null, dn),
     };
   },
-  replyForStaff(t, c, { link, authorName }) {
+  replyForStaff(t, c, { link, authorName, deskName }) {
     return {
       subject: `${tag(t)} ${authorName} replied: ${t.title}`,
-      html: layout(`${esc(authorName)} replied on ${esc(ref(t))}`, quote(c.text), { href: link, label: 'Open in Zenitude Desk' },
-        'Replying to this email posts a public reply that the requester will see.'),
+      html: layout(`${esc(authorName)} replied on ${esc(ref(t))}`, quote(c.text) + shotsNote((c.files || []).length), { href: link, label: 'Open in Zenitude Desk' },
+        'Replying to this email posts a public reply that the requester will see.', deskName),
     };
   },
-  assigned(t, { link, byName, requesterName }) {
+  assigned(t, { link, byName, requesterName, deskName }) {
     return {
       subject: `${tag(t)} Assigned to you (${t.priority}): ${t.title}`,
       html: layout(`${esc(ref(t))} is now yours`,
-        para(`${esc(byName)} assigned you a ticket from <b>${esc(requesterName)}</b>.`) +
+        para(`${esc(byName)} assigned you a ${esc(deskName || 'IT')} ticket from <b>${esc(requesterName)}</b>.`) +
         facts([['Subject', t.title], ['Priority', t.priority], ['Status', t.status]]) + quote(t.description),
         { href: link, label: 'Open in Zenitude Desk' },
-        'Replying to this email posts a public reply that the requester will see.'),
+        'Replying to this email posts a public reply that the requester will see.', deskName),
     };
   },
-  resolved(t, { link, byName }) {
+  resolved(t, { link, byName, deskName }) {
     return {
       subject: `${tag(t)} Resolved: ${t.title}`,
       html: layout('Your ticket has been resolved',
         para(`${esc(byName)} marked <b>${esc(ref(t))}</b> as resolved:`) + quote(t.resolution || '') +
-        para('Please confirm the fix in Zenitude Desk so we can close the ticket. If the problem is still there, reopen it there or reply to this email.'),
-        { href: link, label: 'Confirm or reopen' }),
+        para('Please confirm in Zenitude Desk so we can close the ticket. If it isn\'t sorted, reopen it there or reply to this email.'),
+        { href: link, label: 'Confirm or reopen' }, null, deskName),
     };
   },
-  reopened(t, { link, byName }) {
+  reopened(t, { link, byName, deskName }) {
     return {
       subject: `${tag(t)} Reopened by ${byName}: ${t.title}`,
-      html: layout(`${esc(ref(t))} was reopened`, para(`${esc(byName)} says the problem isn't fixed yet. The ticket is back in progress.`), { href: link, label: 'Open in Zenitude Desk' }),
+      html: layout(`${esc(ref(t))} was reopened`, para(`${esc(byName)} says it isn't sorted yet. The ticket is back in progress.`), { href: link, label: 'Open in Zenitude Desk' }, null, deskName),
     };
   },
 };

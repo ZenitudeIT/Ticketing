@@ -1,143 +1,131 @@
 # Zenitude Desk
 
-**Zenitude Desk** is a standalone IT service desk (ticketing system).
-Team members report IT problems. Technicians pick them up, work them and resolve them. The IT administrator manages the team and watches the numbers.
+**Zenitude Desk** is a ticketing system for every team: **IT**, **HR**, and any other desk you add later.
+Anyone can raise a ticket for a team. Members of that team's desk work on it, and administrators set up desks and people from the website.
 
-It uses a moss-green and gold palette on ivory with the Zenitude emblem, set in Cormorant Garamond and Jost. It is plain **HTML, CSS and JavaScript** with no build step, running on **Firebase** (project `ticketing-de6b4`).
+It's plain **HTML, CSS and JavaScript** with no build step, running on **Firebase** (project `ticketing-de6b4`) on the free **Spark** plan. Email goes through **Microsoft 365**, handled by a free **Google Apps Script**.
 
-## Features
-| | Team member | IT technician | IT administrator |
+## Who can do what
+| | Team member | Desk member (e.g. HR) | Administrator |
 |---|:-:|:-:|:-:|
-| Raise a ticket, follow it, comment | ✓ | ✓ | ✓ |
-| Confirm a fix (close) or reopen a resolved ticket | ✓ (own tickets) | | |
-| See every ticket, filter, search, export CSV | | ✓ | ✓ |
-| Take ownership, assign, change status, priority and category | | ✓ | ✓ |
-| Internal notes (never visible to the requester) | | ✓ | ✓ |
-| Log a ticket for a colleague | | ✓ | ✓ |
-| Overview dashboard: KPIs, charts, SLA, technician workload | | ✓ | ✓ |
+| Raise tickets for any open desk, follow them, comment, add screenshots | ✓ | ✓ | ✓ |
+| Confirm a fix (close) or reopen their own resolved ticket | ✓ | ✓ | ✓ |
+| See **all** tickets of their desk, assign, change status, priority and category | | ✓ | if member |
+| Internal notes (never visible to the requester) | | ✓ | if member |
+| Move a ticket to another desk, log a ticket for a colleague | | ✓ | if member |
+| Overview dashboard, workload, CSV export for their desks | | ✓ | if member |
+| Create and edit **desks**: name, email, members, categories, targets, form questions | | | ✓ |
 | Add people, change roles, disable access, send password reset emails | | | ✓ |
-| Delete tickets, reopen closed tickets | | | ✓ |
 
-**Ticket flow:** Open → In Progress / On Hold → Resolved (a resolution note is required) → Closed (confirmed by the requester).
-**SLA targets by priority:** Critical 4h · High 8h · Medium 24h · Low 72h. Tickets are numbered `ZEN-1001`, `ZEN-1002`, …
+**Privacy:** only a desk's members can read its tickets, including internal notes and screenshots. Administrators manage desks but **don't** see a desk's tickets unless they add themselves as members, and that change is recorded in the desk's history. This is enforced by `firestore.rules` on Firebase's servers, not just by the website.
+
+## Desks
+An administrator opens **Desks** in the menu to create or edit one. Each desk has:
+- **Name and description.** People see these when they choose a team for a new ticket.
+- **Email address.** New-ticket alerts for the desk go here, emails sent to this address become tickets on the desk, and emails to requesters come from it. Leave it empty to use the main IT mailbox. You can change it any time.
+- **Members.** The people who see and work on the desk's tickets and get its email alerts.
+- **Categories** for the desk (e.g. HR: Leave, Payroll, Contracts).
+- **Response targets** in hours for Critical, High, Medium and Low priority.
+- **Extra questions** on the new-ticket form: short or long text, number, date, drop-down or yes/no, each optional or required (e.g. Employee ID, Leave type, First day).
+- **Open / closed.** A closed desk takes no new tickets. Its existing tickets stay.
+
+Desks are never deleted, only closed. The **IT** desk is created automatically the first time an administrator signs in after this update. Existing technicians and admins become its members, and all existing tickets move into it.
+
+**Ticket flow:** Open → In Progress / On Hold → Resolved (a resolution note is required) → Closed (confirmed by the requester). Tickets are numbered `ZEN-1001`, `ZEN-1002`, … across all desks.
+
+**Screenshots:** people can attach up to 5 images when raising a ticket or replying. They can click **Add screenshots**, paste with **Ctrl+V**, or drag images in. Each image is shrunk and compressed in the browser and stored in Firestore, so no Cloud Storage or paid plan is needed.
 
 ## Files
 ```
 index.html            the page
-app.css               all styles (brand palette at the top)
-app.js                the whole app (sign-in, tickets, dashboard, team)
-firebase-config.js    Firebase web config + options (sign-up on/off, allowed email domains)
+app.css               all styles (palette at the top)
+app.js                the whole app (sign-in, desks, tickets, dashboard, team)
+firebase-config.js    Firebase web config + options (sign-up, allowed email domains, main admin)
 firestore.rules       security rules: who can read and change what
 firebase.json         Firebase Hosting + Firestore deploy settings
 .firebaserc           points the Firebase CLI at ticketing-de6b4
 assets/img/           Zenitude emblem and favicons
-functions/            email integration with Microsoft 365 (see "Email")
+apps-script/Code.gs   the email script, pasted into Google Apps Script
+apps-script/src/      its source (gas.js + mail.js); build.py joins them into Code.gs
+apps-script/test/     offline test for the email script: node apps-script/test/run.js
 ```
 
 ## Data (Cloud Firestore)
 | Path | What |
 |---|---|
-| `users/{uid}` | name, email, role (`user` / `tech` / `admin`), active |
-| `tickets/{id}` | num, title, description, category, priority, status, requesterId, assigneeId, createdAt, updatedAt, dueAt, resolvedAt, closedAt, resolution, history[] |
-| `tickets/{id}/comments/{id}` | by, at, text, internal, resolution |
+| `users/{uid}` | name, email, role (`user` / `admin`; older accounts may say `tech`), active |
+| `desks/{deskId}` | name, description, email, active, categories, sla {Low, Medium, High, Critical}, members [uid], fields [{id, label, type, required, options}], log |
+| `tickets/{id}` | num, deskId, title, description, category, priority, status, requesterId, assigneeId, createdAt, updatedAt, dueAt, resolvedAt, closedAt, resolution, fields [{label, value}], history[] |
+| `tickets/{id}/comments/{id}` | by, at, text, internal, resolution, files |
+| `tickets/{id}/files/{id}` (+ `/content/full`) | screenshot preview, and the image itself |
 | `meta/counter` | next ticket number |
 
-Times are stored as milliseconds since 1970 (`Date.now()`).
-
-## Set up Firebase (one time)
-1. In the [Firebase console](https://console.firebase.google.com), open the **ticketing-de6b4** project.
-2. **Build → Authentication → Get started → Sign-in method → Email/Password → Enable.**
-3. **Build → Firestore Database → Create database** (production mode, pick the region closest to your users, e.g. `europe-west` or `asia-south1`).
-4. Install the CLI and deploy the rules and the site:
+## Set up / update Firebase
+1. In the Firebase console (project **ticketing-de6b4**), make sure **Authentication → Email/Password** is enabled and a **Firestore** database exists.
+2. From this folder, deploy the rules and the website:
    ```bash
-   npm install -g firebase-tools
-   firebase login
-   cd zenitude-desk
-   firebase deploy --only firestore:rules,hosting
+   firebase deploy --only "firestore:rules,hosting"
    ```
-   The site goes live at **https://ticketing-de6b4.web.app**.
-5. **Sign in as the main administrator:** `it@zenitudeconcierge.com`.
-   - If the account already exists in **Authentication → Users**, just sign in with its password. Its profile is created automatically with the **IT administrator** role.
-   - If it doesn't exist yet, use **Create account** on the site with that email. It becomes the administrator straight away.
-   - From then on, add everyone else from **Team & roles**. The main admin is protected: no one can demote or disable it from the app.
-   - To change the main admin later, edit `MAIN_ADMIN()` in `firestore.rules` **and** `adminEmails` in `firebase-config.js`, then redeploy.
+   The site runs at **https://ticketing-de6b4.web.app**.
+3. Sign in as the main administrator, **it@zenitudeconcierge.com**. It becomes an administrator automatically and can't be demoted or disabled from the app. To change the main admin, edit `MAIN_ADMIN()` in `firestore.rules` and `adminEmails` in `firebase-config.js`, then redeploy.
+4. Open **Desks**: check the IT desk, then create HR (or other desks) and choose their members.
 
-### Hosting on GitHub Pages instead
-The code is also on GitHub (`ZenitudeIT/Ticketing`). To serve it from GitHub Pages:
-1. Turn on **Settings → Pages → Deploy from branch → main / root**.
-2. In Firebase, add `zenitudeit.github.io` under **Authentication → Settings → Authorised domains**. Sign-in won't work until you do.
-3. Still deploy the security rules once with `firebase deploy --only firestore:rules`.
+Optional: set `allowedEmailDomains: ["zenitudeconcierge.com"]` in `firebase-config.js` to limit self sign-up to work emails, or `allowSignup: false` so only administrators add people.
 
-### Optional
-- **Only allow work emails:** in `firebase-config.js`, set `allowedEmailDomains: ["yourcompany.com"]`, or set `allowSignup: false` so only the admin can add people. To enforce this on the server as well, add `&& request.auth.token.email.matches('.*@yourcompany[.]com$')` to the self sign-up rule in `firestore.rules`.
-- **Authorised domains:** if you host somewhere other than `*.web.app` / `*.firebaseapp.com`, add the domain under **Authentication → Settings → Authorised domains**.
+## Email (Microsoft 365), free with Google Apps Script
+`apps-script/Code.gs` runs every 5 minutes in Google Apps Script, so emails go out and come in within about 5 minutes.
 
-## Run locally
-Run `npx serve .` or `python -m http.server 8000` in this folder, then open http://localhost:8000. It still uses the real Firebase project, so sign-in and data work the same as on the live site. `localhost` is an authorised domain by default.
+| When | Who gets an email | Sent from |
+|---|---|---|
+| A ticket is raised (in the app or by email) | The desk's members + the desk's email address, and a confirmation to the requester | the desk's address |
+| A desk member posts a public reply | The requester (internal notes are never emailed) | the desk's address |
+| The requester replies | The ticket owner, or the whole desk if nobody owns it | the desk's address |
+| A ticket is assigned | The new owner (unless they took it themselves) | the desk's address |
+| A ticket is moved to another desk | The new desk's members + address | the new desk's address |
+| A ticket is resolved | The requester, with the resolution note | the desk's address |
+| The requester reopens a ticket | The owner | the desk's address |
+
+**Incoming mail**
+- The script checks the main mailbox (`MAILBOX`, it@zenitudeconcierge.com) and every open desk's own email address.
+- A **new email** to a desk's address becomes a ticket on that desk. Email to it@ goes to the IT desk.
+- If the sender is new and uses an allowed domain (`zenitudeconcierge.com`), an account is created for them. They sign in later with **Forgot your password?**
+- A **reply** with `[ZEN-1234]` in the subject becomes a comment on that ticket, whichever mailbox it arrives at. A reply to a closed ticket opens a follow-up.
+- Screenshots in emails are copied onto the ticket: up to 5 images per email, 700 KB each.
+- Ignored: out-of-office replies, bounces, mailing lists, other domains, Zenitude Desk's own notifications, mail from before a mailbox was first watched, and mail to a closed desk.
+- A newly added desk address starts being watched on the next run. Only email arriving after that becomes tickets.
+- If a desk's address isn't a Microsoft 365 mailbox the script can use, its emails are sent from it@ instead, and a warning appears under **Executions** in Apps Script.
+
+### 1. Microsoft Entra app (Microsoft 365 admin, done once)
+App registration **Zenitude Desk** (single tenant), with Microsoft Graph **Application** permissions **Mail.Send** and **Mail.ReadWrite** and **admin consent**. Put its client ID, tenant ID and a client secret in the Apps Script **Script Properties** (step 3).
+
+The desk addresses (e.g. hr@zenitudeconcierge.com) must be real **Microsoft 365 mailboxes** (a shared mailbox is fine, and free). Recommended: limit the app to just these mailboxes. Create a mail-enabled security group (e.g. `zenitude-desk-mailboxes@…`) containing it@ and every desk mailbox, then run:
+```powershell
+Connect-ExchangeOnline
+New-ApplicationAccessPolicy -AppId <client-id> -PolicyScopeGroupId zenitude-desk-mailboxes@zenitudeconcierge.com -AccessRight RestrictAccess -Description "Zenitude Desk mailboxes only"
+```
+When you add a desk with a new address, add that mailbox to the group.
+
+### 2. Firebase service account key (free on Spark)
+Firebase console → ⚙ **Project settings → Service accounts → Generate new private key**. Keep the `.json` file private and never put it on GitHub.
+
+### 3. Apps Script
+1. Go to <https://script.google.com> and create a project called `Zenitude Desk email`. Paste the whole of `apps-script/Code.gs` and click **Save**.
+2. Open ⚙ **Project Settings → Script Properties** and add `SERVICE_ACCOUNT_JSON` (the whole key file), `MS_TENANT_ID`, `MS_CLIENT_ID` and `MS_CLIENT_SECRET`.
+3. Run **setup** once and allow the permissions. The log shows ✓ for Firebase and Microsoft 365. Optionally run **sendTestEmail**.
+
+**Updating the script later:** paste the new `Code.gs` over the old one and save. You don't need to run setup again. To pause email, run **stop**. To restart, run **setup**.
+
+**Settings** are at the top of `Code.gs`: `MAILBOX`, `APP_URL`, `ALLOWED_DOMAINS`, `TIMEZONE` and `RUN_EVERY_MINUTES`.
+
+## Free-plan limits
+Everything runs on the Spark plan. Its daily Firestore allowance (50,000 reads, 20,000 writes, 1 GiB stored) easily covers a team of a few dozen people. Going over a limit pauses that service until the next day and never costs money. You can check usage under **Firestore → Usage**.
+
+## Testing offline
+```bash
+node apps-script/test/run.js      # email script: fake Google, Firebase and Microsoft 365
+```
 
 ## Security notes
-- The Firebase API key in `firebase-config.js` is meant to be public. Protection comes from **Authentication + `firestore.rules`**. Always deploy the rules.
-- The rules enforce the roles on the server:
-  - Team members can only read their own tickets and never see internal notes.
-  - Only staff can assign or change tickets.
-  - Only admins can change roles, and never their own.
-  - Disabled people lose access immediately.
-- Anyone signed in can see the team list (names and emails), which is needed to show who raised or owns a ticket.
-- These rules have **not been run against the Firebase emulator yet**. Test them on the project before real use, for example with the Rules Playground in the console, or with `firebase emulators:start` and a few sign-ins with different roles.
-- Recommended: turn on **App Check** to limit abuse.
-
-## Email (Microsoft 365)
-`functions/` connects Zenitude Desk to the **it@zenitudeconcierge.com** mailbox through Microsoft Graph.
-
-| When | Who gets an email |
-|---|---|
-| A ticket is raised (in the app or by email) | All active technicians and admins, plus a confirmation to the requester |
-| IT posts a public reply | The requester (internal notes are never emailed) |
-| The requester replies | The ticket owner, or all of IT if nobody owns it |
-| A ticket is assigned | The new owner (unless they took it themselves) |
-| A ticket is resolved | The requester, with the resolution note |
-| The requester reopens a ticket | The owner |
-
-**Incoming mail.** The mailbox is checked every 2 minutes.
-- A **new email** becomes a ticket. The sender is the requester, the subject is the title, the body is the description, and Outlook's "High importance" sets High priority.
-- If the sender is new and uses an allowed domain (by default `zenitudeconcierge.com`), an account is created for them. They can sign in later with **Forgot your password?**
-- A **reply** with `[ZEN-1234]` in the subject becomes a comment on that ticket. Quoted history is removed. Replies from IT staff are posted as **public** replies.
-- A reply to a **closed** ticket opens a new follow-up ticket.
-- Ignored: out-of-office replies, bounces, mailing lists, senders outside the allowed domains, Zenitude Desk's own notifications, and anything already in the inbox before setup.
-- Processed emails are marked as read. Everything else is left untouched for a person to read.
-- If someone replies from the it@ mailbox itself (in Outlook), the reply goes straight to the person and is **not** recorded on the ticket. Reply from the app, or from your own mailbox, instead.
-
-### 1. Register an app in Microsoft Entra (Microsoft 365 admin)
-1. Go to <https://entra.microsoft.com> → **Applications → App registrations → New registration**. Name it `Zenitude Desk`, choose **Single tenant**, then **Register**.
-2. On the overview page, copy the **Application (client) ID** and the **Directory (tenant) ID**.
-3. **Certificates & secrets → New client secret** (24 months). Copy the secret's **Value** now, because it is shown only once.
-4. **API permissions → Add a permission → Microsoft Graph → Application permissions**. Tick **Mail.Send** and **Mail.ReadWrite**, then click **Grant admin consent**.
-5. **Strongly recommended:** limit the app to the IT mailbox only. Without this step it could read every mailbox in the company. In Exchange Online PowerShell, run:
-   ```powershell
-   Connect-ExchangeOnline
-   New-ApplicationAccessPolicy -AppId <client-id> -PolicyScopeGroupId it@zenitudeconcierge.com -AccessRight RestrictAccess -Description "Zenitude Desk: IT mailbox only"
-   Test-ApplicationAccessPolicy -AppId <client-id> -Identity it@zenitudeconcierge.com   # should say Granted
-   ```
-   Microsoft's newer "RBAC for Applications" in Exchange does the same job if your tenant uses it.
-
-### 2. Firebase
-1. **Upgrade the project to the Blaze plan.** Cloud Functions require it. Pay-as-you-go includes a free monthly allowance, which a small help desk normally stays within. Set a **budget alert** (for example $5) under *Usage and billing*.
-2. Check your **Firestore location** (Firestore → database details). If it isn't `europe-west1`, change `REGION` at the top of `functions/index.js`. Use `europe-west1` for `eur3` and `us-central1` for `nam5`.
-3. Configure and deploy:
-   ```bash
-   cd functions
-   cp .env.example .env          # then put your tenant ID and client ID in .env
-   npm install
-   npm test                      # offline self-test, no Microsoft or Firebase needed
-   firebase functions:secrets:set MS_CLIENT_SECRET   # paste the secret Value from Entra
-   cd ..
-   firebase deploy --only functions,firestore:rules
-   ```
-   The first deploy switches on a few Google Cloud APIs and can take several minutes. If it fails with an API or permissions message, wait a minute and run it again.
-4. Test it. Raise a ticket in the app, and the IT team plus the requester should get emails. Then send an email to it@zenitudeconcierge.com from a colleague's account. Within about 2 minutes it should appear as a new ticket.
-
-**Logs:** run `firebase functions:log`, or open Firebase console → Functions → Logs. Every email sent, ticket created and email ignored is logged there.
-
-**Settings** (in `functions/.env`): `MAILBOX`, `APP_URL` (the address used in email links; change it if you host on GitHub Pages), `ALLOWED_DOMAINS` (comma-separated) and `TIMEZONE`.
-
-**Not included:** email attachments are not copied onto tickets yet. They stay in the mailbox.
+- The Firebase API key in `firebase-config.js` is public by design. Protection comes from **Authentication + `firestore.rules`**. Always deploy the rules after updating.
+- Anyone signed in can see the list of people and desks (names, emails, desk members), which is needed to show who raised or works a ticket.
+- These rules haven't been run against the Firebase emulator. Try them in the console's **Rules Playground** before relying on them for sensitive HR matters.

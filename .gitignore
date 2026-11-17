@@ -1,0 +1,7 @@
+# Never commit keys or local settings
+*firebase-adminsdk*.json
+service-account*.json
+serviceAccount*.json
+.env
+**/.env
+node_modules/
