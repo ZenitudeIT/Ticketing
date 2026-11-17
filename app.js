@@ -30,6 +30,8 @@
     'Closed': ['In Progress'],
   };
   const HOUR = 3600e3, DAY = 24 * HOUR;
+  const MAX_FILES = 5;               // screenshots per message
+  const MAX_IMAGE_CHARS = 900000;    // compressed image (data URL) must fit in one Firestore document
   const EMPTY_FILTERS = () => ({ q: '', status: 'active', priority: '', assignee: '', category: '', sort: 'updated' });
 
   /* ---------- state ---------- */
@@ -41,6 +43,7 @@
     me: null,                 // users/{uid} document + id
     users: {}, tickets: {}, ticketsLoaded: false, usersLoaded: false,
     comments: [], cTid: null, cLoaded: false, cErr: false, extra: {}, probe: {},
+    files: [], pending: {}, attBusy: null,
     subStaff: null, unsub: {},
     route: 'dashboard', modal: null, busy: false, registering: false, dataErr: '',
     f: EMPTY_FILTERS(),
@@ -164,7 +167,7 @@
   function stopAll() {
     Object.values(S.unsub).forEach((u) => { try { u(); } catch (e) { } });
     S.unsub = {}; S.subStaff = null; S.cTid = null;
-    S.users = {}; S.tickets = {}; S.comments = []; S.extra = {}; S.probe = {}; S.ticketsLoaded = false; S.usersLoaded = false; S.dataErr = '';
+    S.users = {}; S.tickets = {}; S.comments = []; S.extra = {}; S.probe = {}; S.files = []; S.pending = {}; S.ticketsLoaded = false; S.usersLoaded = false; S.dataErr = '';
   }
   function onAuth(user) {
     stopAll();
@@ -195,7 +198,7 @@
     }, (e) => { S.phase = 'error'; S.fatal = dbMsg(e); render(); });
   }
   function stopData() {
-    ['t', 'u', 'c'].forEach((k) => { if (S.unsub[k]) { S.unsub[k](); delete S.unsub[k]; } });
+    ['t', 'u', 'c', 'f'].forEach((k) => { if (S.unsub[k]) { S.unsub[k](); delete S.unsub[k]; } });
     S.subStaff = null; S.cTid = null; S.ticketsLoaded = false;
   }
   function startData() {
@@ -221,8 +224,14 @@
     const id = S.phase === 'ready' && S.route.startsWith('ticket-') ? S.route.slice(7) : null;
     if (id === S.cTid) return;
     if (S.unsub.c) { S.unsub.c(); delete S.unsub.c; }
-    S.cTid = id; S.comments = []; S.cLoaded = false; S.cErr = false;
+    if (S.unsub.f) { S.unsub.f(); delete S.unsub.f; }
+    S.cTid = id; S.comments = []; S.cLoaded = false; S.cErr = false; S.files = [];
     if (!id) return;
+    let fq = S.db.collection('tickets').doc(id).collection('files');
+    if (!isStaff()) fq = fq.where('internal', '==', false);
+    S.unsub.f = fq.onSnapshot((s) => {
+      S.files = s.docs.map((d) => Object.assign({ id: d.id }, d.data())).sort((a, b) => a.at - b.at); render();
+    }, (e) => console.error('[Zenitude Desk] files listener', e));
     if (!S.tickets[id] && !S.extra[id]) probeTicket(id);
     let q = S.db.collection('tickets').doc(id).collection('comments');
     if (!isStaff()) q = q.where('internal', '==', false);
@@ -231,6 +240,89 @@
       S.cLoaded = true; render();
     }, () => { S.cLoaded = true; S.cErr = true; render(); });
   }
+
+  /* ---------- screenshots ---------- */
+  // Images are shrunk and compressed in the browser, then stored in Firestore
+  // (free plan friendly): tickets/{id}/files/{fid} holds a small preview,
+  // tickets/{id}/files/{fid}/content/full holds the full image.
+  function loadImg(file) {
+    return new Promise((res, rej) => {
+      const url = URL.createObjectURL(file), img = new Image();
+      img.onload = () => { URL.revokeObjectURL(url); res(img); };
+      img.onerror = () => { URL.revokeObjectURL(url); rej(new Error('this image could not be read')); };
+      img.src = url;
+    });
+  }
+  function toJpeg(img, maxDim, quality) {
+    const r = Math.min(1, maxDim / Math.max(img.naturalWidth, img.naturalHeight));
+    const w = Math.max(1, Math.round(img.naturalWidth * r)), h = Math.max(1, Math.round(img.naturalHeight * r));
+    const c = document.createElement('canvas'); c.width = w; c.height = h;
+    const x = c.getContext('2d'); x.fillStyle = '#fff'; x.fillRect(0, 0, w, h); x.drawImage(img, 0, 0, w, h);
+    return { data: c.toDataURL('image/jpeg', quality), w, h };
+  }
+  async function prepareImage(file) {
+    if (file.size > 25e6) throw new Error('larger than 25 MB');
+    const img = await loadImg(file);
+    let dim = 2000, q = 0.85, out = toJpeg(img, dim, q);
+    while (out.data.length > MAX_IMAGE_CHARS && dim > 600) { if (q > 0.6) q -= 0.1; else dim = Math.round(dim * 0.8); out = toJpeg(img, dim, q); }
+    if (out.data.length > MAX_IMAGE_CHARS) throw new Error('too large, even after compressing');
+    let th = toJpeg(img, 360, 0.7); if (th.data.length > 70000) th = toJpeg(img, 220, 0.6);
+    const base = (file.name && !/^image\.(png|jpe?g|gif|webp)$/i.test(file.name) ? file.name.replace(/\.[a-z0-9]+$/i, '') : 'screenshot-' + new Date().toISOString().slice(0, 16).replace(/[:T]/g, '-'));
+    return { id: 'p' + Math.random().toString(36).slice(2, 10), name: (base.slice(0, 140) + '.jpg'), full: out.data, thumb: th.data, width: out.w, height: out.h, size: Math.round(out.data.length * 0.75) };
+  }
+  async function addFiles(key, fileList) {
+    const imgs = [...(fileList || [])].filter((f) => /^image\//.test(f.type));
+    if (!imgs.length) { toast('Only images (PNG, JPG, screenshots) can be attached.', 'error'); return; }
+    const list = (S.pending[key] = S.pending[key] || []);
+    const room = MAX_FILES - list.length;
+    if (room <= 0) { toast('You can attach up to ' + MAX_FILES + ' screenshots at a time.', 'error'); return; }
+    S.attBusy = key; render();
+    for (const f of imgs.slice(0, room)) {
+      try { list.push(await prepareImage(f)); } catch (e) { toast((f.name || 'Image') + ': ' + e.message + '.', 'error'); }
+    }
+    if (imgs.length > room) toast('Only the first ' + MAX_FILES + ' screenshots were added.');
+    S.attBusy = null; render();
+  }
+  // Adds the screenshot documents to a batch; returns their ids.
+  function addFileWrites(batch, tid, list, internal, commentId) {
+    return list.map((p) => {
+      const ref = S.db.collection('tickets').doc(tid).collection('files').doc();
+      batch.set(ref, { by: S.user.uid, at: now(), name: p.name, type: 'image/jpeg', width: p.width, height: p.height, size: p.size, internal: !!internal, commentId: commentId || null, thumb: p.thumb });
+      batch.set(ref.collection('content').doc('full'), { data: p.full });
+      return ref.id;
+    });
+  }
+  function attachBox(key, disabled) {
+    const list = S.pending[key] || [];
+    return `<div class="att" data-drop="${esc(key)}">
+      ${list.length ? `<div class="thumbs">${list.map((p) => `<div class="thumb"><img src="${esc(p.thumb)}" alt="${esc(p.name)}"><button type="button" class="thumb__x" data-act="unattach" data-key="${esc(key)}" data-id="${esc(p.id)}" aria-label="Remove ${esc(p.name)}">×</button></div>`).join('')}</div>` : ''}
+      <div class="att__row">
+        <label class="btn btn--ghost btn--sm att__btn ${disabled || list.length >= MAX_FILES ? 'is-off' : ''}">${icon('image')} Add screenshots<input type="file" accept="image/*" multiple data-attach="${esc(key)}" ${disabled ? 'disabled' : ''}></label>
+        <span class="hint" style="margin:0">${S.attBusy === key ? 'Preparing image…' : `or paste (Ctrl+V) or drag images here · up to ${MAX_FILES}`}</span>
+      </div></div>`;
+  }
+  function gallery(tid, list) {
+    if (!list.length) return '';
+    return `<div class="gallery">${list.map((f) => `<button type="button" class="shot" data-act="view-file" data-tid="${esc(tid)}" data-id="${esc(f.id)}" title="${esc(f.name)}">
+      ${f.thumb ? `<img src="${esc(f.thumb)}" alt="${esc(f.name)}">` : `<span class="shot__ph">${icon('image')}<small>${esc(f.name)}</small></span>`}</button>`).join('')}</div>`;
+  }
+  function dataUrlToBlob(u) {
+    const [head, b64] = u.split(','), type = (/data:([^;]+)/.exec(head) || [])[1] || 'image/jpeg';
+    const bin = atob(b64), arr = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
+    return new Blob([arr], { type });
+  }
+  async function openFile(tid, fid) {
+    const f = S.files.find((x) => x.id === fid); if (!f) return;
+    S.modal = { type: 'file', tid, fid, name: f.name, by: f.by, url: null, err: '' }; render();
+    try {
+      const d = await S.db.collection('tickets').doc(tid).collection('files').doc(fid).collection('content').doc('full').get();
+      if (!S.modal || S.modal.fid !== fid) return;
+      if (!d.exists) { S.modal.err = 'This screenshot is no longer available.'; return render(); }
+      S.modal.url = URL.createObjectURL(dataUrlToBlob(d.data().data)); render();
+    } catch (e) { if (S.modal && S.modal.fid === fid) { S.modal.err = dbMsg(e); render(); } }
+  }
+  function closeModal() { if (S.modal && S.modal.url) URL.revokeObjectURL(S.modal.url); S.modal = null; render(); }
 
   // Read one ticket directly when it isn't in the live list (just created, or the list failed to load).
   function probeTicket(id) {
@@ -465,6 +557,7 @@
       </div>
       <div class="field"><label class="lbl" for="nt-desc">Description</label><textarea id="nt-desc" class="input" rows="6" maxlength="5000" placeholder="What happened, when it started, any error message, and what you've already tried…" data-bind="draft.nt.description">${esc(d.description)}</textarea>
         <div class="hint">Use Critical only when something stops the whole team from working, such as an email or network outage.</div></div>
+      <div class="field"><label class="lbl">Screenshots <span style="text-transform:none;letter-spacing:0">(optional)</span></label>${attachBox('new', S.busy)}</div>
       ${d.err ? `<div class="err">${esc(d.err)}</div>` : ''}
       <div class="row" style="justify-content:flex-end;margin-top:.6rem"><a class="btn btn--ghost" href="#tickets">Cancel</a><button class="btn btn--primary" type="submit" ${S.busy ? 'disabled' : ''}>${S.busy ? 'Submitting…' : 'Submit ticket'}</button></div>
     </form></div>`;
@@ -494,6 +587,12 @@
         tx.set(tRef, Object.assign({ num }, base));
         return num;
       });
+      const shots = S.pending.new || [];
+      if (shots.length) {
+        try { const b = S.db.batch(); addFileWrites(b, tRef.id, shots, false, null); await b.commit(); }
+        catch (e) { console.error(e); toast('The ticket was created, but the screenshots could not be uploaded: ' + dbMsg(e), 'error'); }
+      }
+      S.pending.new = [];
       S.draft.nt = { title: '', description: '', category: 'Hardware', priority: 'Medium', requesterId: '', err: '' };
       S.busy = false;
       toast('ZEN-' + num + ' raised. Target: within ' + SLA_HOURS[base.priority] + 'h.');
@@ -520,7 +619,7 @@
       : `<div class="cm"><div class="avatar ${S.users[it.c.by] && S.users[it.c.by].role !== 'user' ? 'avatar--gold' : ''}">${esc(initials(it.c.by))}</div>
           <div class="cm__body ${it.c.internal ? 'cm__body--note' : ''} ${it.c.resolution ? 'cm__body--res' : ''}">
           <div class="cm__head"><b>${esc(name(it.c.by))}</b>${S.users[it.c.by] && S.users[it.c.by].role !== 'user' ? '<span class="tag">IT</span>' : ''}${it.c.internal ? '<span class="tag tag--note">Internal note</span>' : ''}${it.c.resolution ? '<span class="tag tag--res">Resolution</span>' : ''}${it.c.source === 'email' ? '<span class="tag">By email</span>' : ''}<span class="muted" title="${esc(fmtDate(it.at))}">${rel(it.at)}</span></div>
-          <div class="cm__text">${esc(it.c.text)}</div></div></div>`).join('');
+          <div class="cm__text">${esc(it.c.text)}</div>${gallery(id, S.files.filter((f) => f.commentId === it.c.id))}</div></div>`).join('');
     const next = (FLOW[t.status] || []).filter(() => !(closed && !isAdmin()));
     const statusCtl = staff
       ? `<select id="st-${esc(id)}" class="input" data-chg="status" data-id="${esc(id)}" ${next.length ? '' : 'disabled'} aria-label="Change status">${opt(t.status, t.status, t.status)}${next.map((s) => opt(s, '→ ' + s, '')).join('')}</select>`
@@ -537,7 +636,7 @@
       <div>
         ${confirmBox}
         <div class="panel" style="margin-bottom:1.1rem"><div class="panel__h"><h2>Description</h2><span class="small muted" style="margin-left:auto">${esc(name(t.requesterId))} · ${esc(fmtDate(t.createdAt))}</span></div>
-          <div class="panel__b"><div class="desc">${esc(t.description)}</div>
+          <div class="panel__b"><div class="desc">${esc(t.description)}</div>${gallery(id, S.files.filter((f) => !f.commentId))}
           ${t.resolution && (t.status === 'Resolved' || closed) ? `<div class="res"><b>Resolution</b><div class="desc">${esc(t.resolution)}</div></div>` : ''}</div></div>
         <div class="panel"><div class="panel__h"><h2>Activity</h2><span class="small muted">${comments.length} comment${comments.length === 1 ? '' : 's'} · ${(t.history || []).length} events</span></div>
           <div class="panel__b"><div class="timeline">${timeline}${!S.cLoaded ? '<div class="small muted">Loading comments…</div>' : ''}${S.cErr ? '<div class="err">Comments couldn\'t be loaded.</div>' : ''}</div>
@@ -545,6 +644,7 @@
           ${canComment ? `<form data-form="comment" data-id="${esc(id)}">
             <label class="lbl" for="c-${esc(id)}">${staff ? 'Reply or add a note' : 'Add a comment'}</label>
             <textarea id="c-${esc(id)}" class="input" rows="3" maxlength="4000" placeholder="${staff ? 'Reply to the requester, or tick “Internal note” for IT eyes only…' : 'Add detail or reply to IT…'}" data-bind="draft.comment.${esc(id)}">${esc(S.draft.comment[id] || '')}</textarea>
+            ${attachBox(id)}
             <div class="row" style="margin-top:.6rem">${staff ? `<label class="check"><input type="checkbox" id="ci-${esc(id)}" data-bind="draft.internal.${esc(id)}" ${S.draft.internal[id] ? 'checked' : ''}> Internal note (hidden from requester)</label>` : ''}<span class="grow"></span><button class="btn ${S.draft.internal[id] ? 'btn--gold' : 'btn--primary'}" type="submit">${S.draft.internal[id] ? 'Add note' : 'Post comment'}</button></div>
           </form>` : '<div class="small muted">This ticket is closed. Raise a new ticket if the problem comes back.</div>'}
           </div></div></div>
@@ -593,6 +693,10 @@
     try {
       const ref = S.db.collection('tickets').doc(id);
       const cs = await ref.collection('comments').get();
+      const fs = await ref.collection('files').get();
+      for (const f of fs.docs) {                          // one screenshot per batch: each is up to ~1 MB
+        const b = S.db.batch(); b.delete(f.ref.collection('content').doc('full')); b.delete(f.ref); await b.commit();
+      }
       const batch = S.db.batch();
       cs.docs.forEach((d) => batch.delete(d.ref));
       batch.delete(ref);
@@ -687,6 +791,15 @@
     if (m.type === 'delete') { const t = S.tickets[m.id]; return wrap(`Delete ${t ? esc(ref(t)) : 'ticket'}?`,
       `<p class="t2">“${t ? esc(t.title) : ''}”, with its comments and history, will be removed for everyone. This can't be undone.</p>`,
       cancel + `<button class="btn btn--danger" data-act="do-delete" data-id="${esc(m.id)}">Delete ticket</button>`); }
+    if (m.type === 'file') {
+      const canDelete = isAdmin() || m.by === S.me.id;
+      return `<div class="modal" data-act="overlay"><div class="modal__box modal__box--wide" role="dialog" aria-modal="true">
+        <div class="modal__head row"><h3 class="grow" style="font-size:1.2rem;overflow-wrap:anywhere">${esc(m.name)}</h3><button type="button" class="btn btn--ghost btn--sm" data-act="close-modal">Close</button></div>
+        <div class="modal__body viewer">${m.err ? `<div class="err">${esc(m.err)}</div>` : m.url ? `<img src="${esc(m.url)}" alt="${esc(m.name)}">` : '<div class="muted">Loading screenshot…</div>'}</div>
+        <div class="modal__foot">${canDelete ? (m.confirm ? `<span class="small t2 grow">Delete this screenshot for everyone?</span><button class="btn btn--ghost btn--sm" data-act="file-del-cancel">Keep</button><button class="btn btn--danger btn--sm" data-act="file-del">Delete</button>` : `<button class="btn btn--danger-ghost btn--sm" data-act="file-del-ask">Delete</button><span class="grow"></span>`) : '<span class="grow"></span>'}
+          ${m.url && !m.confirm ? `<a class="btn btn--ghost btn--sm" href="${esc(m.url)}" target="_blank" rel="noopener">Open full size</a><a class="btn btn--primary btn--sm" href="${esc(m.url)}" download="${esc(m.name)}">Download</a>` : ''}</div>
+      </div></div>`;
+    }
     if (m.type === 'chpw') return `<form data-form="chpw">${wrap('Change your password',
       `<div class="field"><label class="lbl" for="m-c">Current password</label><input id="m-c" class="input" type="password" autocomplete="current-password" value="${esc(m.c || '')}" data-bind="modal.c"></div>
        <div class="field"><label class="lbl" for="m-n">New password</label><input id="m-n" class="input" type="password" autocomplete="new-password" value="${esc(m.n || '')}" data-bind="modal.n"></div>
@@ -749,8 +862,20 @@
       try { await S.db.collection('users').doc(id).update({ active }); toast(u.name + (active ? ' can sign in again.' : ' has been disabled.')); } catch (e) { fail(e); }
     },
     chpw() { S.modal = { type: 'chpw' }; render(); },
-    'close-modal'() { S.modal = null; render(); },
-    overlay(el, e) { if (e.target === el) { S.modal = null; render(); } },
+    'close-modal'() { closeModal(); },
+    overlay(el, e) { if (e.target === el) closeModal(); },
+    unattach(el) { const k = el.dataset.key; S.pending[k] = (S.pending[k] || []).filter((p) => p.id !== el.dataset.id); render(); },
+    'view-file'(el) { openFile(el.dataset.tid, el.dataset.id); },
+    'file-del-ask'() { S.modal.confirm = true; render(); },
+    'file-del-cancel'() { S.modal.confirm = false; render(); },
+    async 'file-del'() {
+      const { tid, fid } = S.modal;
+      try {
+        const ref = S.db.collection('tickets').doc(tid).collection('files').doc(fid);
+        const b = S.db.batch(); b.delete(ref.collection('content').doc('full')); b.delete(ref); await b.commit();
+        closeModal(); toast('Screenshot deleted.');
+      } catch (e) { fail(e); }
+    },
   };
   const changes = {
     async status(el) {
@@ -812,13 +937,22 @@
     },
     'new-ticket'() { if (!S.busy) createTicket(); },
     async comment(form) {
-      const id = form.dataset.id, text = (S.draft.comment[id] || '').trim(); if (!text) return;
+      const id = form.dataset.id, typed = (S.draft.comment[id] || '').trim(), shots = S.pending[id] || [];
+      if (!typed && !shots.length) return;
+      if (S.attBusy === id) { toast('Wait a moment, the screenshot is still being prepared.'); return; }
       const internal = isStaff() && !!S.draft.internal[id];
-      S.draft.comment[id] = ''; S.draft.internal[id] = false; render();
+      const text = typed || (shots.length === 1 ? 'Attached a screenshot.' : `Attached ${shots.length} screenshots.`);
+      S.draft.comment[id] = ''; S.draft.internal[id] = false; S.pending[id] = []; render();
       try {
-        await S.db.collection('tickets').doc(id).collection('comments').add({ by: S.user.uid, at: now(), text, internal });
+        const tRef = S.db.collection('tickets').doc(id), cRef = tRef.collection('comments').doc();
+        const batch = S.db.batch();
+        const fids = addFileWrites(batch, id, shots, internal, cRef.id);
+        const c = { by: S.user.uid, at: now(), text, internal };
+        if (fids.length) c.files = fids;
+        batch.set(cRef, c);
+        await batch.commit();
         await update(id, {}, []);
-      } catch (e) { S.draft.comment[id] = text; fail(e); render(); }
+      } catch (e) { S.draft.comment[id] = typed; S.pending[id] = shots; fail(e); render(); }
     },
     async resolve() {
       const m = S.modal, note = (m.note || '').trim();
@@ -856,7 +990,24 @@
   });
   document.addEventListener('change', (e) => { const el = e.target; if (el.dataset && el.dataset.chg && changes[el.dataset.chg]) changes[el.dataset.chg](el); });
   document.addEventListener('submit', (e) => { e.preventDefault(); const f = e.target.dataset.form; if (forms[f]) forms[f](e.target); });
-  document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && S.modal) { S.modal = null; render(); } });
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && S.modal) closeModal(); });
+  // Screenshots: file picker, paste (Ctrl+V) and drag-and-drop
+  document.addEventListener('change', (e) => { const el = e.target; if (el.dataset && el.dataset.attach) { addFiles(el.dataset.attach, el.files); el.value = ''; } });
+  function attachKey() {
+    if (S.phase !== 'ready' || (S.modal && S.modal.type !== undefined)) return null;
+    if (S.route === 'new') return 'new';
+    if (S.route.startsWith('ticket-') && document.querySelector('form[data-form="comment"]')) return S.route.slice(7);
+    return null;
+  }
+  document.addEventListener('paste', (e) => {
+    const key = attachKey(); if (!key || !e.clipboardData) return;
+    const files = [...e.clipboardData.items].filter((i) => i.kind === 'file' && /^image\//.test(i.type)).map((i) => i.getAsFile()).filter(Boolean);
+    if (!files.length) return;
+    e.preventDefault(); addFiles(key, files);
+  });
+  document.addEventListener('dragover', (e) => { const z = e.target.closest && e.target.closest('[data-drop]'); if (z) { e.preventDefault(); z.classList.add('is-over'); } });
+  document.addEventListener('dragleave', (e) => { const z = e.target.closest && e.target.closest('[data-drop]'); if (z) z.classList.remove('is-over'); });
+  document.addEventListener('drop', (e) => { const z = e.target.closest && e.target.closest('[data-drop]'); if (!z) return; e.preventDefault(); z.classList.remove('is-over'); addFiles(z.dataset.drop, e.dataTransfer && e.dataTransfer.files); });
   setInterval(() => { const a = document.activeElement, typing = a && (a.tagName === 'INPUT' || a.tagName === 'TEXTAREA'); if (S.phase === 'ready' && !S.modal && !typing) render(); }, 60000);
 
   /* ---------- icons ---------- */
@@ -867,6 +1018,7 @@
       plus: '<path d="M12 5v14M5 12h14"/>',
       users: '<circle cx="9" cy="8" r="3.5"/><path d="M2.5 20c.8-3.5 3.4-5.5 6.5-5.5s5.7 2 6.5 5.5"/><path d="M16 4.5a3.5 3.5 0 0 1 0 7M18 14.8c2 .7 3.2 2.5 3.6 5.2"/>',
       download: '<path d="M12 4v11M7 10l5 5 5-5M5 20h14"/>',
+      image: '<rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="9" cy="10" r="2"/><path d="m21 16-5-5-9 9"/>',
     }[n] || '';
     return `<svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${p}</svg>`;
   }
