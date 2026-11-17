@@ -1,0 +1,136 @@
+rules_version = '2';
+// Zenitude Desk — Firestore security rules.
+// Roles live in users/{uid}.role: 'user' (staff member raising tickets),
+// 'tech' (IT technician) or 'admin' (IT manager). The FIRST admin is made by
+// hand in the Firebase console (see README). These rules are the real security:
+// the web app only hides buttons, the rules decide what is allowed.
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function signedIn() { return request.auth != null; }
+    function me() { return get(/databases/$(database)/documents/users/$(request.auth.uid)).data; }
+    function hasProfile() { return signedIn() && exists(/databases/$(database)/documents/users/$(request.auth.uid)); }
+    function active() { return hasProfile() && me().active == true; }
+    function isStaff() { return active() && me().role in ['tech', 'admin']; }
+    function isAdmin() { return active() && me().role == 'admin'; }
+    function str(v, min, max) { return v is string && v.size() >= min && v.size() <= max; }
+    function roles() { return ['user', 'tech', 'admin']; }
+    function statuses() { return ['Open', 'In Progress', 'On Hold', 'Resolved', 'Closed']; }
+    function priorities() { return ['Low', 'Medium', 'High', 'Critical']; }
+
+    // The main IT administrator account. It becomes admin automatically on first
+    // sign-in, and nobody can demote or disable it from the app.
+    function MAIN_ADMIN() { return 'it@zenitudeconcierge.com'; }
+    function isMainAdmin() { return signedIn() && request.auth.token.email is string && request.auth.token.email.lower() == MAIN_ADMIN(); }
+
+    // ---------- people ----------
+    match /users/{uid} {
+      // Everyone signed in can see names (needed to show who raised / works a ticket).
+      allow read: if signedIn();
+
+      // Self sign-up: always an active end user, with their own sign-in email.
+      allow create: if signedIn() && request.auth.uid == uid
+        && request.resource.data.keys().hasOnly(['name', 'email', 'role', 'active', 'createdAt'])
+        && str(request.resource.data.name, 2, 80)
+        && request.resource.data.email == request.auth.token.email
+        && (request.resource.data.role == 'user' || (request.resource.data.role == 'admin' && isMainAdmin()))
+        && request.resource.data.active == true;
+
+      // Admins add people with any role.
+      allow create: if isAdmin()
+        && request.resource.data.keys().hasOnly(['name', 'email', 'role', 'active', 'createdAt'])
+        && str(request.resource.data.name, 2, 80)
+        && str(request.resource.data.email, 5, 160)
+        && request.resource.data.role in roles()
+        && request.resource.data.active is bool;
+
+      // People may change their own display name only.
+      allow update: if signedIn() && request.auth.uid == uid
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['name'])
+        && str(request.resource.data.name, 2, 80);
+
+      // The main admin account can always restore its own admin role.
+      allow update: if isMainAdmin() && request.auth.uid == uid
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['role', 'active'])
+        && request.resource.data.role == 'admin' && request.resource.data.active == true;
+
+      // Admins change other people's role, name or access (never their own, so they can't lock themselves out,
+      // and never the main admin account).
+      allow update: if isAdmin() && request.auth.uid != uid
+        && resource.data.email.lower() != MAIN_ADMIN()
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['role', 'active', 'name'])
+        && request.resource.data.role in roles()
+        && request.resource.data.active is bool;
+
+      allow delete: if false;
+    }
+
+    // ---------- sequential ticket numbers (ZEN-1001, ZEN-1002, …) ----------
+    match /meta/counter {
+      allow read: if active();
+      allow create: if active() && request.resource.data.keys().hasOnly(['next']) && request.resource.data.next == 1002;
+      allow update: if active() && request.resource.data.keys().hasOnly(['next']) && request.resource.data.next == resource.data.next + 1;
+    }
+
+    // Email integration bookkeeping (Cloud Functions only; the admin SDK bypasses these rules).
+    match /meta/mailbox { allow read, write: if false; }
+    match /mailLog/{id} { allow read, write: if false; }
+
+    // ---------- tickets ----------
+    match /tickets/{tid} {
+      function n() { return request.resource.data; }
+      function o() { return resource.data; }
+      function changed() { return n().diff(o()).affectedKeys(); }
+
+      allow read: if isStaff() || (active() && o().requesterId == request.auth.uid);
+
+      allow create: if active()
+        && n().keys().hasOnly(['num', 'title', 'description', 'category', 'priority', 'status', 'requesterId', 'assigneeId',
+                               'createdAt', 'updatedAt', 'dueAt', 'resolvedAt', 'closedAt', 'resolution', 'history', 'createdBy'])
+        && (n().requesterId == request.auth.uid || isStaff())
+        && n().createdBy == request.auth.uid
+        && n().status == 'Open' && n().assigneeId == null
+        && str(n().title, 5, 120) && str(n().description, 10, 5000) && str(n().category, 2, 40)
+        && n().priority in priorities()
+        && n().num is int
+        && getAfter(/databases/$(database)/documents/meta/counter).data.next == n().num + 1
+        && n().history.size() == 1;
+
+      // IT staff: work the ticket. Who raised it, its number and creation time never change.
+      allow update: if isStaff()
+        && n().requesterId == o().requesterId && n().num == o().num && n().createdAt == o().createdAt
+        && n().status in statuses() && n().priority in priorities()
+        && n().history.size() >= o().history.size();
+
+      // The person who raised it: confirm a fix (Resolved → Closed), reopen it (Resolved → In Progress),
+      // or bump updatedAt when they comment. Nothing else.
+      allow update: if active() && o().requesterId == request.auth.uid
+        && changed().hasOnly(['status', 'closedAt', 'resolvedAt', 'resolution', 'updatedAt', 'history'])
+        && n().history.size() >= o().history.size()
+        && ( (n().status == o().status && changed().hasOnly(['updatedAt']))
+          || (o().status == 'Resolved' && n().status in ['Closed', 'In Progress']) );
+
+      allow delete: if isAdmin();
+
+      // ---------- comments & internal notes ----------
+      match /comments/{cid} {
+        function ticket() { return get(/databases/$(database)/documents/tickets/$(tid)).data; }
+
+        // Internal notes are only ever readable by IT staff.
+        allow read: if isStaff()
+          || (active() && ticket().requesterId == request.auth.uid && resource.data.internal == false);
+
+        allow create: if active()
+          && request.resource.data.keys().hasOnly(['by', 'at', 'text', 'internal', 'resolution'])
+          && request.resource.data.by == request.auth.uid
+          && str(request.resource.data.text, 1, 4000)
+          && request.resource.data.internal is bool
+          && ( isStaff()
+            || (ticket().requesterId == request.auth.uid && request.resource.data.internal == false && ticket().status != 'Closed') );
+
+        allow update: if false;
+        allow delete: if isAdmin();
+      }
+    }
+  }
+}
