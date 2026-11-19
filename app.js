@@ -40,6 +40,8 @@
   const EMPTY_FILTERS = () => ({ q: '', status: 'active', priority: '', assignee: '', category: '', desk: '', sort: 'updated' });
   const EMPTY_NT = () => ({ deskId: '', title: '', description: '', category: '', priority: 'Medium', requesterId: '', fields: {}, err: '' });
 
+  let HR = null;   // HR module (hr.js): staff, leave, payroll — only for members of the HR desk
+
   /* ---------- state ---------- */
   const S = {
     phase: 'boot',            // boot | signed-out | profile | disabled | ready | error
@@ -48,7 +50,7 @@
     user: null,               // Firebase auth user
     me: null,                 // users/{uid} document + id
     users: {}, tickets: {}, ticketsLoaded: false, usersLoaded: false,
-    desks: {}, desksLoaded: false, tsub: {}, tq: {}, tqLoaded: {}, deskDraft: null, dashDesk: '', settingUp: false,
+    desks: {}, desksLoaded: false, hrDeskId: '', tsub: {}, tq: {}, tqLoaded: {}, deskDraft: null, dashDesk: '', settingUp: false,
     comments: [], cTid: null, cLoaded: false, cErr: false, extra: {}, probe: {},
     files: [], pending: {}, attBusy: null,
     unsub: {},
@@ -190,7 +192,8 @@
   function stopAll() {
     Object.values(S.unsub).forEach((u) => { try { u(); } catch (e) { } });
     Object.values(S.tsub).forEach((u) => { try { u(); } catch (e) { } });
-    S.unsub = {}; S.tsub = {}; S.tq = {}; S.tqLoaded = {}; S.cTid = null;
+    S.unsub = {}; S.tsub = {}; S.tq = {}; S.tqLoaded = {}; S.cTid = null; S.hrDeskId = '';
+    if (HR) HR.stop();
     S.users = {}; S.desks = {}; S.tickets = {}; S.comments = []; S.extra = {}; S.probe = {}; S.files = []; S.pending = {};
     S.ticketsLoaded = false; S.usersLoaded = false; S.desksLoaded = false; S.dataErr = ''; S.deskDraft = null; S.dashDesk = '';
   }
@@ -223,7 +226,8 @@
     }, (e) => { S.phase = 'error'; S.fatal = dbMsg(e); render(); });
   }
   function stopData() {
-    ['u', 'd', 'c', 'f'].forEach((k) => { if (S.unsub[k]) { S.unsub[k](); delete S.unsub[k]; } });
+    if (HR) HR.stop();
+    ['u', 'd', 'c', 'f', 'h'].forEach((k) => { if (S.unsub[k]) { S.unsub[k](); delete S.unsub[k]; } });
     Object.values(S.tsub).forEach((u) => { try { u(); } catch (e) { } });
     S.tsub = {}; S.tq = {}; S.tqLoaded = {}; S.cTid = null; S.ticketsLoaded = false;
   }
@@ -236,8 +240,13 @@
     if (!S.unsub.d) {
       S.unsub.d = S.db.collection('desks').onSnapshot((s) => {
         const o = {}; s.docs.forEach((d) => { o[d.id] = d.data(); }); S.desks = o; S.desksLoaded = true;
-        firstTimeSetup(); syncTickets(); prepareRoute(); render();
+        firstTimeSetup(); syncTickets(); prepareRoute(); if (HR) HR.sync(); render();
       }, (e) => { console.error('[Zenitude Desk] desks listener', e); S.dataErr = 'Desks couldn\'t load: ' + errText(e); S.desksLoaded = true; syncTickets(); render(); });
+    }
+    if (!S.unsub.h) {
+      // Which desk runs the HR module (staff, leave, payroll). Set by an administrator on the Desks page.
+      S.unsub.h = S.db.doc('meta/hr').onSnapshot((d) => { S.hrDeskId = (d.exists && d.data().deskId) || ''; if (HR) HR.sync(); prepareRoute(); render(); },
+        (e) => { console.error('[Zenitude Desk] HR setting', e); });
     }
     syncTickets();
   }
@@ -401,6 +410,7 @@
   // Desk editor: make an editable copy of the desk when you open it.
   function prepareRoute() {
     const r = S.route;
+    if (HR) HR.prepare(r);
     if (r !== 'desk-new' && !(r.startsWith('desk-') && r !== 'desks')) { S.deskDraft = null; return; }
     if (!S.me) return;
     const id = r === 'desk-new' ? null : r.slice(5);
@@ -411,6 +421,7 @@
       id, name: d.name || '', description: d.description || '', email: d.email || '', active: d.active !== false,
       categories: (d.categories || []).slice(), newCat: '', sla: Object.assign({}, SLA_HOURS, d.sla || {}), members: (d.members || []).slice(), q: '',
       fields: (d.fields || []).map((f) => Object.assign({}, f, { optionsText: (f.options || []).join(', ') })), err: '',
+      isHR: !!id && S.hrDeskId === id,
     };
   }
 
@@ -445,14 +456,17 @@
     const act = vis.filter((t) => ACTIVE.includes(t.status)).length;
     const links = [['dashboard', 'Overview', 'grid'], ['tickets', isAgent() ? 'Tickets' : 'My tickets', 'list', act], ['new', 'New ticket', 'plus']];
     if (isAdmin()) links.push(['desks', 'Desks', 'desk'], ['users', 'Team & roles', 'users']);
-    const on = (k) => (r === k || (k === 'tickets' && r.startsWith('ticket-')) || (k === 'desks' && r.startsWith('desk-')) ? 'on' : '');
+    const on = (k) => (r === k || (k === 'tickets' && r.startsWith('ticket-')) || (k === 'desks' && r.startsWith('desk-')) || (HR && HR.navOn(k, r)) ? 'on' : '');
+    const hrLinks = HR ? HR.links() : [];
+    const link = ([k, l, ic, c]) => `<a class="side__link ${on(k)}" href="#${k}">${icon(ic)}<span>${l}</span>${c ? `<span class="badge">${c}</span>` : ''}</a>`;
     const mine = myDeskIds();
     const roleLabel = isAdmin() ? 'Administrator' : mine.length ? mine.map(deskName).join(' · ') + ' desk' : 'Team member';
     return `<div class="layout">
       <aside class="side">
         <a class="side__brand" href="#dashboard"><img src="assets/img/emblem-gold.png" alt=""><div><strong>ZENITUDE</strong><small>Service Desk</small></div></a>
         <nav class="side__nav"><div class="side__label">Menu</div>
-          ${links.map(([k, l, ic, c]) => `<a class="side__link ${on(k)}" href="#${k}">${icon(ic)}<span>${l}</span>${c ? `<span class="badge">${c}</span>` : ''}</a>`).join('')}
+          ${links.map(link).join('')}
+          ${hrLinks.length ? `<div class="side__label" style="margin-top:1rem">HR</div>${hrLinks.map(link).join('')}` : ''}
         </nav>
         <div class="side__foot">${mine.length ? 'Your desks: ' + esc(mine.map(deskName).join(', ')) : 'Zenitude Desk'}<br>${isAdmin() ? 'You manage desks and people' : 'Service desk'}</div>
       </aside>
@@ -474,6 +488,7 @@
   }
   function content() {
     const r = S.route;
+    if (HR && HR.owns(r)) return HR.view(r);
     if (r === 'tickets') return ticketsView();
     if (r === 'new') return newTicketView();
     if (r === 'users') return isAdmin() ? usersView() : denied();
@@ -883,7 +898,7 @@
     <div class="banner banner--info">Only a desk's <b>members</b> can see its tickets. As an administrator you manage desks, but you only see the tickets of desks you're a member of.</div>
     <div class="desk-grid">${ids.map((id) => { const d = S.desks[id], ms = agentsOf(id), open = Object.values(S.tickets).filter((t) => deskId(t) === id && ACTIVE.includes(t.status)).length;
       return `<a class="panel desk-box" href="#desk-${esc(id)}">
-        <div class="row"><h2 class="grow">${esc(d.name)}</h2>${d.active === false ? '<span class="pill st-closed"><i></i>Closed</span>' : '<span class="pill st-open"><i></i>Open</span>'}</div>
+        <div class="row"><h2 class="grow">${esc(d.name)}</h2>${S.hrDeskId === id ? '<span class="desk-tag">HR module</span>' : ''}${d.active === false ? '<span class="pill st-closed"><i></i>Closed</span>' : '<span class="pill st-open"><i></i>Open</span>'}</div>
         <p class="small t2">${esc(d.description || 'No description')}</p>
         <div class="desk-box__facts">
           <div><span class="k">Email</span>${d.email ? esc(d.email) : '<span class="muted">Main IT mailbox</span>'}</div>
@@ -913,6 +928,8 @@
         </div>
         <div class="field"><label class="lbl" for="dd-desc">Description</label><input id="dd-desc" class="input" maxlength="160" placeholder="What people should come to this desk for" value="${esc(d.description)}" data-bind="deskDraft.description"><div class="hint">Shown when someone chooses a team for a new ticket.</div></div>
         <label class="check"><input type="checkbox" id="dd-active" data-bind="deskDraft.active" ${d.active ? 'checked' : ''}> Open: people can raise new tickets for this desk</label>
+        <div style="margin-top:.7rem"><label class="check"><input type="checkbox" id="dd-hr" data-bind="deskDraft.isHR" ${d.isHR ? 'checked' : ''}> HR desk: its members also get Staff records, Leave and Payroll</label>
+          <div class="hint">${S.hrDeskId && S.hrDeskId !== d.id && S.desks[S.hrDeskId] ? `Currently the ${esc(deskName(S.hrDeskId))} desk. Ticking this moves the HR pages to this desk.` : 'Salaries and staff records are only visible to this desk\'s members, not to other administrators.'}</div></div>
       </div></div>
 
       <div class="panel"><div class="panel__h"><h2>Members</h2><span class="small muted">${d.members.length} selected</span></div><div class="panel__b">
@@ -982,6 +999,8 @@
     S.busy = true; render();
     try {
       await S.db.collection('desks').doc(id).set(doc);
+      if (d.isHR && S.hrDeskId !== id) await S.db.doc('meta/hr').set({ deskId: id, updatedAt: now(), updatedBy: by });
+      else if (!d.isHR && S.hrDeskId === id) await S.db.doc('meta/hr').set({ deskId: '', updatedAt: now(), updatedBy: by });
       S.busy = false; S.deskDraft = null;
       toast(old ? `${nm} desk saved.` : `${nm} desk created.`);
       go('desks');
@@ -1023,6 +1042,7 @@
   /* ---------- modals ---------- */
   function modalView() {
     const m = S.modal; if (!m) return '';
+    if (HR && String(m.type).startsWith('hr-')) return HR.modal(m);
     const wrap = (title, body, foot) => `<div class="modal" data-act="overlay"><div class="modal__box" role="dialog" aria-modal="true"><div class="modal__head"><h3>${title}</h3></div><div class="modal__body">${body}</div><div class="modal__foot">${foot}</div></div></div>`;
     const cancel = '<button type="button" class="btn btn--ghost" data-act="close-modal">Cancel</button>';
     if (m.type === 'resolve') return `<form data-form="resolve">${wrap('Resolve ticket',
@@ -1258,6 +1278,7 @@
   });
   // Screenshots: file picker, paste (Ctrl+V) and drag-and-drop
   document.addEventListener('change', (e) => { const el = e.target; if (el.dataset && el.dataset.attach) { addFiles(el.dataset.attach, el.files); el.value = ''; } });
+  document.addEventListener('change', (e) => { const el = e.target; if (HR && el.dataset && el.dataset.hrdoc) { HR.uploadDocs(el.dataset.hrdoc, el.files); el.value = ''; } });
   function attachKey() {
     if (S.phase !== 'ready' || (S.modal && S.modal.type !== undefined)) return null;
     if (S.route === 'new') return 'new';
@@ -1285,9 +1306,20 @@
       download: '<path d="M12 4v11M7 10l5 5 5-5M5 20h14"/>',
       desk: '<path d="M3 10h18M5 10V7a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2v3M6 10v9M18 10v9M9 14h6"/>',
       image: '<rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="9" cy="10" r="2"/><path d="m21 16-5-5-9 9"/>',
+      heart: '<path d="M12 20s-7-4.4-7-10a4 4 0 0 1 7-2.6A4 4 0 0 1 19 10c0 5.6-7 10-7 10z"/>',
+      calendar: '<rect x="3" y="5" width="18" height="16" rx="2"/><path d="M3 10h18M8 3v4M16 3v4"/>',
+      cash: '<rect x="2.5" y="6" width="19" height="12" rx="2"/><circle cx="12" cy="12" r="2.5"/><path d="M6 9.5v5M18 9.5v5"/>',
+      cog: '<circle cx="12" cy="12" r="3"/><path d="M12 2.5v3M12 18.5v3M2.5 12h3M18.5 12h3M5.3 5.3l2.1 2.1M16.6 16.6l2.1 2.1M5.3 18.7l2.1-2.1M16.6 7.4l2.1-2.1"/>',
     }[n] || '';
     return `<svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${p}</svg>`;
   }
+
+  /* ---------- HR module (hr.js) ---------- */
+  HR = window.ZenHRModule ? window.ZenHRModule({
+    S, esc, opt, icon, name, byName, rel, toast, fail, dbMsg, render, go, now, isAdmin, isAgentOf, deskName, slaFor, categoriesOf, emailOk,
+    prepareImage, dataUrlToBlob, closeModal, HOUR,
+  }) : null;
+  if (HR) { Object.assign(actions, HR.actions); Object.assign(changes, HR.changes); Object.assign(forms, HR.forms); }
 
   boot();
 })();

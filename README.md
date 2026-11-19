@@ -35,11 +35,49 @@ Desks are never deleted, only closed. The **IT** desk is created automatically t
 
 **Screenshots:** people can attach up to 5 images when raising a ticket or replying. They can click **Add screenshots**, paste with **Ctrl+V**, or drag images in. Each image is shrunk and compressed in the browser and stored in Firestore, so no Cloud Storage or paid plan is needed.
 
+## HR module: staff, leave and payroll
+On the **Desks** page, tick **HR desk** on one desk (normally HR). Its members get extra pages: **HR overview, Staff, Leave, Payroll** and **HR settings**.
+Nobody else can open them, administrators included, unless they're added to that desk. `firestore.rules` enforces this on Firebase's servers.
+
+- **Staff:** one record per employee.
+  - Personal and job details, contract, start date and probation, bank details, basic salary and allowances, dependents (from their EDF), and leave allowance overrides.
+  - Documents: PDFs up to about 650 KB, and photos.
+  - Joining and leaving checklists.
+  - **Ask IT** buttons that raise a ticket on the IT desk for a new joiner or a leaver.
+  - People are marked as left, never deleted.
+- **Leave:** HR records leave and approves it.
+  - Only working days count; set the working week and public holidays in HR settings.
+  - Balances per calendar year, a month calendar, and CSV export.
+  - Unpaid leave is flagged in payroll.
+- **Payroll:** one pay run per month.
+  - Everyone employed that month is added from their staff record. HR adjusts each person (overtime, bonus, deductions, pro-rating for mid-month joiners or leavers), then **finalises**.
+  - A finalised run is locked and its payslips can be printed or saved as PDF. It can be reopened.
+  - Exports: a bank list (net pay per person) and a contributions file (PAYE, CSG, NSF, levy, PRGF per person).
+  - In December it offers the end-of-year bonus (1/12 of the year's pay).
+- **Calculation** (`payroll.js`):
+  - PAYE uses the MRA cumulative method across the tax year (1 July – 30 June).
+  - CSG, NSF, the training levy and PRGF are worked out on basic salary.
+  - The rates live in **HR settings → Payroll rates**, per tax year. 2026-27 is preset from the Finance Act 2026: bands 0% / 10% / 20% / 35% at Rs 500,000 / 1,000,000 / 12,000,000; CSG 1.5–3% employee and 3–6% employer around Rs 50,000; NSF 1% + 2.5% up to Rs 29,710; levy 1.5%; PRGF 4.5%.
+  - When a budget changes the rates, click **Next tax year** and update them. The 2026-27 budget plans to replace NSF and PRGF with a new fund (NPPF) from July 2027.
+  - Have your accountant check the first pay runs against your current payroll.
+
+| Path | What |
+|---|---|
+| `meta/hr` | which desk runs the HR module |
+| `employees/{id}` (+ `/docs/{id}`, `/docs/{id}/content/full`) | staff records and their documents |
+| `leave/{id}` | leave records |
+| `payruns/{YYYY-MM}` | one pay run per month with each person's payslip |
+| `hrSettings/main`, `hrSettings/payroll` | departments, working days, holidays, leave types, checklists; tax and contribution rates |
+
+Test the payroll maths offline with `node apps-script/test/payroll.test.js`.
+
 ## Files
 ```
 index.html            the page
 app.css               all styles (palette at the top)
-app.js                the whole app (sign-in, desks, tickets, dashboard, team)
+app.js                the main app (sign-in, desks, tickets, dashboard, team)
+hr.js                 HR module: staff, leave, payroll, HR settings
+payroll.js            Mauritius payroll calculator (PAYE, CSG, NSF, levy, PRGF)
 firebase-config.js    Firebase web config + options (sign-up, allowed email domains, main admin)
 firestore.rules       security rules: who can read and change what
 firebase.json         Firebase Hosting + Firestore deploy settings

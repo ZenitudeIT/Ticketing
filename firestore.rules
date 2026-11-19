@@ -31,6 +31,9 @@ service cloud.firestore {
     function deskExists(d) { return d is string && exists(deskPath(d)); }
     // Member of a desk = may see and work on its tickets.
     function isAgentOf(d) { return active() && deskExists(d) && request.auth.uid in get(deskPath(d)).data.members; }
+    // HR module: members of the desk named in meta/hr (set by an administrator on the Desks page).
+    function hrDesk() { return get(/databases/$(database)/documents/meta/hr).data.deskId; }
+    function isHR() { return active() && exists(/databases/$(database)/documents/meta/hr) && hrDesk() is string && hrDesk() != '' && isAgentOf(hrDesk()); }
 
     // ---------- people ----------
     match /users/{uid} {
@@ -98,6 +101,50 @@ service cloud.firestore {
       allow read: if active();
       allow create: if active() && request.resource.data.keys().hasOnly(['next']) && request.resource.data.next == 1002;
       allow update: if active() && request.resource.data.keys().hasOnly(['next']) && request.resource.data.next == resource.data.next + 1;
+    }
+
+    // Which desk runs the HR module. Everyone signed in can read it (to show or hide the HR menu).
+    match /meta/hr {
+      allow read: if signedIn();
+      allow write: if isAdmin()
+        && request.resource.data.keys().hasOnly(['deskId', 'updatedAt', 'updatedBy'])
+        && request.resource.data.deskId is string
+        && (request.resource.data.deskId == '' || deskExists(request.resource.data.deskId))
+        && request.resource.data.updatedBy == request.auth.uid;
+    }
+
+    // ---------- HR: staff records, leave, payroll ----------
+    // Only HR desk members. Administrators who aren't HR members can't read salaries.
+    match /employees/{eid} {
+      allow read, create, update: if isHR();
+      allow delete: if false;            // people are marked as left, never deleted
+      match /docs/{did} {
+        allow read, create, delete: if isHR();
+        allow update: if false;
+        match /content/{part} {
+          allow read, delete: if isHR();
+          allow create: if isHR() && request.resource.data.keys().hasOnly(['data'])
+            && request.resource.data.data is string && request.resource.data.data.size() < 1000000;
+          allow update: if false;
+        }
+      }
+    }
+    match /leave/{lid} {
+      allow read, create, update, delete: if isHR();
+    }
+    match /hrSettings/{sid} {
+      allow read: if isHR();
+      allow write: if isHR() && sid in ['main', 'payroll'];
+    }
+    match /payruns/{month} {
+      allow read: if isHR();
+      allow create: if isHR() && request.resource.data.month == month && request.resource.data.status == 'draft';
+      // A finalised pay run is locked: it can only be reopened (status back to draft).
+      allow update: if isHR() && request.resource.data.month == month
+        && (resource.data.status != 'final'
+            || (request.resource.data.status == 'draft'
+                && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'updatedAt', 'updatedBy', 'log'])));
+      allow delete: if isHR() && resource.data.status != 'final';
     }
 
     // Email script bookkeeping (Apps Script uses a service account, which bypasses these rules).
