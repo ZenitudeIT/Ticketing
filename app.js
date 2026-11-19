@@ -64,7 +64,7 @@
       login: { email: '', p: '', err: '', info: '' },
       reg: { name: '', email: '', p: '', p2: '', err: '' },
       profile: { name: '', err: '' },
-      nu: { name: '', email: '', role: 'user', department: '', p: '', err: '' },
+      nu: { name: '', email: '', role: 'user', department: '', p: '', err: '' }, newDept: '',
     },
   };
 
@@ -90,7 +90,8 @@
   const agentsOf = (id) => ((S.desks[id] && S.desks[id].members) || []).filter((u) => S.users[u] && S.users[u].active !== false).sort(byName);
   const agentsOfMany = (ids) => [...new Set(ids.flatMap(agentsOf))].sort(byName);
   // Departments: the company list (set in HR settings) plus any already in use.
-  const deptList = () => [...new Set(((S.org && S.org.departments) || DEFAULT_DEPTS).concat(Object.values(S.users).map((u) => u.department).filter(Boolean)))];
+  const deptList = () => ((S.org && S.org.departments) || DEFAULT_DEPTS).slice();
+  const deptOpts = (cur) => { const l = deptList(); if (cur && !l.includes(cur)) l.push(cur); return l; };
   const desksOfUser = (uid) => allDeskIds().filter((id) => memberOf(uid, id));
   const isOverdue = (t) => ACTIVE.includes(t.status) && t.dueAt && now() > t.dueAt;
   const resTime = (t) => (t.resolvedAt ? t.resolvedAt - t.createdAt : null);
@@ -877,11 +878,15 @@
         <div style="flex:1;min-width:160px"><label class="lbl" for="nu-p">Temporary password</label><input id="nu-p" class="input" type="password" value="${esc(d.p)}" data-bind="draft.nu.p" autocomplete="new-password" placeholder="6+ characters"></div>
         <button class="btn btn--primary" type="submit" ${S.busy ? 'disabled' : ''}>${S.busy ? 'Adding…' : 'Add person'}</button>
       </div>${d.err ? `<div class="err">${esc(d.err)}</div>` : ''}<div class="hint">They can sign in straight away and change the password from the top bar.</div></form></div>
+    <div class="panel" style="margin-bottom:1.1rem"><div class="panel__h"><h2>Departments</h2><span class="small muted">used for people here and in HR</span></div><div class="panel__b">
+      <div class="chips">${deptList().map((x, i) => { const n = Object.values(S.users).filter((u) => u.department === x).length; return `<span class="chip dept-chip">${esc(x)}${n ? `<small>${n}</small>` : ''}<button type="button" data-act="dept-del" data-i="${i}" aria-label="Remove ${esc(x)}" title="${n ? 'People in it keep it until you change them' : 'Remove'}">×</button></span>`; }).join('')}</div>
+      <div class="row" style="margin-top:.7rem;max-width:460px"><input id="dept-new" class="input" maxlength="40" placeholder="Add a department, e.g. Housekeeping" value="${esc(S.draft.newDept || '')}" data-bind="draft.newDept"><button type="button" class="btn btn--ghost" data-act="dept-add">Add</button></div>
+    </div></div>
     <div class="panel"><div class="tbl-wrap"><table class="tbl"><thead><tr><th>Person</th><th>Department</th><th>Role</th><th>Desks</th><th>Raised</th><th>Access</th><th></th></tr></thead><tbody>
     ${ids.map((id) => { const u = S.users[id], self = id === S.me.id, off = u.active === false, locked = self || isAdminEmail(u.email);
       const ud = desksOfUser(id);
       return `<tr><td><div class="row"><div class="avatar ${ud.length ? 'avatar--gold' : ''}">${esc(initials(id))}</div><div><div class="ttl">${esc(u.name)}</div><div class="sub" style="overflow-wrap:anywhere">${esc(u.email || '')}</div>${self || isAdminEmail(u.email) ? `<div class="row" style="gap:.3rem;margin-top:.2rem">${self ? '<span class="tag">You</span>' : ''}${isAdminEmail(u.email) ? '<span class="tag tag--note">Main admin</span>' : ''}</div>` : ''}</div></div></td>
-        <td><select id="dp-${esc(id)}" class="input" style="height:32px;min-width:150px" data-chg="dept" data-id="${esc(id)}" aria-label="Department for ${esc(u.name)}">${opt('', '—', u.department || '')}${deptList().map((x) => opt(x, x, u.department || '')).join('')}</select></td>
+        <td><select id="dp-${esc(id)}" class="input" style="height:32px;min-width:150px" data-chg="dept" data-id="${esc(id)}" aria-label="Department for ${esc(u.name)}">${opt('', '—', u.department || '')}${deptOpts(u.department).map((x) => opt(x, x, u.department || '')).join('')}</select></td>
         <td><select id="ro-${esc(id)}" class="input" style="height:32px;min-width:150px" data-chg="role" data-id="${esc(id)}" ${locked ? 'disabled' : ''} aria-label="Role for ${esc(u.name)}">${Object.entries(ROLE_CHOICES).map(([k, v]) => opt(k, v, u.role === 'admin' ? 'admin' : 'user')).join('')}</select></td>
         <td>${ud.length ? ud.map((x) => `<span class="desk-tag">${esc(deskName(x))}</span>`).join(' ') : '<span class="muted small">None</span>'}</td>
         <td>${all.filter((t) => t.requesterId === id).length}</td>
@@ -1106,7 +1111,18 @@
   }
 
   /* ---------- events ---------- */
+  async function saveDepts(list, msg) {
+    try { await S.db.doc('meta/org').set({ departments: list, updatedAt: now(), updatedBy: S.me.id }); toast(msg); }
+    catch (e) { fail(e); }
+  }
   const actions = {
+    'dept-add'() {
+      const v = (S.draft.newDept || '').trim().replace(/\s+/g, ' ');
+      if (!v) { toast('Type the department name first.', 'error'); return; }
+      const l = deptList(); if (l.some((x) => x.toLowerCase() === v.toLowerCase())) { toast(v + ' is already in the list.', 'error'); return; }
+      S.draft.newDept = ''; saveDepts(l.concat([v]), v + ' added.');
+    },
+    'dept-del'(el) { const l = deptList(), v = l[+el.dataset.i]; l.splice(+el.dataset.i, 1); saveDepts(l, v + ' removed from the list.'); },
     reload() { location.reload(); },
     async logout() { try { await S.auth.signOut(); } catch (e) { } S.f = EMPTY_FILTERS(); history.replaceState(null, '', location.pathname + location.search); readRoute(); },
     tab(el) { S.authTab = el.dataset.v; render(); },
@@ -1299,6 +1315,7 @@
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape' && S.modal) closeModal();
     if (e.key === 'Enter' && e.target && e.target.id === 'dd-newcat') { e.preventDefault(); actions['cat-add'](); }
+    if (e.key === 'Enter' && e.target && e.target.id === 'dept-new') { e.preventDefault(); actions['dept-add'](); }
   });
   // Screenshots: file picker, paste (Ctrl+V) and drag-and-drop
   document.addEventListener('change', (e) => { const el = e.target; if (el.dataset && el.dataset.attach) { addFiles(el.dataset.attach, el.files); el.value = ''; } });

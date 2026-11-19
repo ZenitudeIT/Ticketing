@@ -21,6 +21,7 @@ window.ZenHRModule = function (A) {
     departments: ['Concierge', 'Operations', 'Front office', 'Sales & Marketing', 'Finance', 'HR', 'IT', 'Management'],
     workDays: [1, 2, 3, 4, 5],            // Monday–Friday (0 = Sunday)
     hoursPerDay: 8,                      // used to price overtime and lateness
+    deductLate: false,                   // deduct minutes late from pay
     otRate: 1.5,                         // overtime = hourly rate × this
     holidays: [],                        // [{ date: 'YYYY-MM-DD', name }]
     leaveTypes: [
@@ -704,10 +705,45 @@ window.ZenHRModule = function (A) {
       deductions: (slip.deductions || []).map((x) => ({ label: x.label, amount: num(x.amount) })), dependents: num(slip.dependents), otherReliefs: num(slip.otherReliefs),
       csg: slip.csg !== false, nsf: slip.nsf !== false, prgf: slip.prgf !== false, levy: slip.levy !== false, prior: priorFor(slip._id, month) });
   }
+  // Pay adjustments worked out from the staff record, attendance register and leave:
+  // days not employed (joined/left mid-month), absences and half days, unpaid leave,
+  // lateness (if switched on in HR settings) and overtime. Recalculated live on drafts,
+  // written onto the payslip when the run is finalised.
+  function autoLines(id, month, s) {
+    const out = { earn: [], ded: [], t: null };
+    if (!s || s.noAuto) return out;
+    const e = H.emps[id], first = month + '-01', last = monthEnd(month), mm = main();
+    const wd = Math.max(1, workingDays(first, last));
+    const basic = (s.earnings || []).filter((x) => x.kind === 'basic' && !x.auto).reduce((t, x) => t + num(x.amount), 0);
+    const daily = basic / wd, hourly = daily / (Number(mm.hoursPerDay) || 8);
+    const d2 = (n) => money2(n) + ' day' + (n === 1 ? '' : 's');
+    // Unpaid time is taken off basic pay (so tax and contributions follow what is actually paid).
+    const cut = (x) => out.earn.push({ label: x.label, amount: -x.amount, kind: 'basic', taxable: true });
+    if (e) {
+      let emp = 0; for (let d = first; d <= last; d = addDays(d, 1)) if (isWorkDay(d) && employedOn(e, d)) emp++;
+      const off = wd - emp;
+      if (off > 0 && basic) cut({ label: `Not employed ${d2(off)} of ${wd} (${e.startDate > first ? 'joined ' + fmtD(e.startDate) : 'left ' + fmtD(e.endDate)})`, amount: Math.round(daily * off) });
+    }
+    const t = out.t = attSummary(id, first, last);
+    const missed = t.A + t.H * 0.5;
+    if (missed && basic) cut({ label: `Absence (${[t.A ? d2(t.A) : '', t.H ? t.H + ' half day' + (t.H > 1 ? 's' : '') : ''].filter(Boolean).join(', ')})`, amount: Math.round(daily * missed) });
+    const unpaid = leaveArr().filter((l) => l.empId === id && l.status === 'Approved' && !ltype(l.typeId).paid).reduce((n, l) => n + daysWithin(l, first, last), 0);
+    if (unpaid && basic) cut({ label: `Unpaid leave (${d2(unpaid)})`, amount: Math.round(daily * unpaid) });
+    if (mm.deductLate && t.lateMin && basic) cut({ label: `Lateness (${t.lateMin} min)`, amount: Math.round(hourly * t.lateMin / 60) });
+    if (t.ot && basic) out.earn.push({ label: `Overtime (${money2(t.ot)} h × ${mm.otRate ?? 1.5})`, amount: Math.round(hourly * (Number(mm.otRate) || 1.5) * t.ot), kind: 'overtime', taxable: true });
+    out.earn.forEach((x) => { x.auto = true; }); out.ded.forEach((x) => { x.auto = true; });
+    return out;
+  }
+  function withAuto(id, month, s) {
+    const a = autoLines(id, month, s);
+    return Object.assign({}, s, { earnings: (s.earnings || []).filter((x) => !x.auto).concat(a.earn), deductions: (s.deductions || []).filter((x) => !x.auto).concat(a.ded) });
+  }
   function slipCalc(run, id) {
     const s = run.slips[id];
     if (run.status === 'final' && s.calc) return s.calc;
-    return calcFor(Object.assign({ _id: id }, s), run.month);
+    const c = calcFor(Object.assign({ _id: id }, withAuto(id, run.month, s)), run.month);
+    if (c && !s.noAuto) { const t = attSummary(id, run.month + '-01', monthEnd(run.month)); if (t.unmarked) c.warnings.push(`${t.unmarked} working day${t.unmarked === 1 ? ' isn\'t' : 's aren\'t'} marked in the attendance register yet. They count as present.`); }
+    return c;
   }
   function runTotals(month, src) {
     const run = src || H.runs[month], t = { staff: 0, gross: 0, net: 0, paye: 0, csgEe: 0, csgEr: 0, nsfEe: 0, nsfEr: 0, levy: 0, prgf: 0, otherDed: 0, employerCost: 0 };
@@ -732,6 +768,7 @@ window.ZenHRModule = function (A) {
     const r = H.runs[m];
     if (!r) { H.run = { month: m, missing: true }; H.runSrc = ''; return; }
     H.run = JSON.parse(JSON.stringify(r)); H.run.month = m;
+    if (H.run.status !== 'final') Object.values(H.run.slips || {}).forEach((s) => { s.earnings = s.earnings.filter((x) => !x.auto); s.deductions = (s.deductions || []).filter((x) => !x.auto); });
     Object.values(H.run.slips || {}).forEach((s) => { s.earnings.forEach((x) => { x.amount = String(x.amount); }); (s.deductions || []).forEach((x) => { x.amount = String(x.amount); }); s.dependents = String(s.dependents || 0); s.otherReliefs = String(s.otherReliefs || ''); });
     H.runSrc = JSON.stringify(H.run.slips);
   }
@@ -757,7 +794,7 @@ window.ZenHRModule = function (A) {
     <div class="kpis">${kp('Staff', t.staff)}${kp('Gross pay', money(t.gross))}${kp('PAYE', money(t.paye))}${kp('CSG + NSF', money(t.csgEe + t.csgEr + t.nsfEe + t.nsfEr))}${kp('Net pay', money(t.net))}${kp('Cost to Zenitude', money(t.employerCost))}</div>
     <div class="panel"><div class="tbl-wrap"><table class="tbl"><thead><tr><th>Employee</th><th class="num">Gross</th><th class="num">PAYE</th><th class="num">CSG</th><th class="num">NSF</th><th class="num">Other</th><th class="num">Net pay</th><th class="num hide-sm">Employer cost</th><th></th></tr></thead><tbody>
       ${ids.map((id) => { const s = run.slips[id], c = slipCalc(run, id); if (!c) return `<tr><td>${esc(s.name)}</td><td colspan="8" class="muted">No rates</td></tr>`;
-        return `<tr class="click ${H.slipId === id ? 'sel' : ''}" data-act="hr-slip" data-id="${esc(id)}"><td><b>${esc(s.name)}</b><div class="sub">${esc([s.empNo, s.department].filter(Boolean).join(' · '))}${c.warnings.length ? ' · <span class="neg">check</span>' : ''}${!final && (() => { const t = attSummary(id, run.month + '-01', monthEnd(run.month)); return t.A || t.H || t.ot; })() ? ' · <span class="neg">attendance</span>' : ''}</div></td>
+        return `<tr class="click ${H.slipId === id ? 'sel' : ''}" data-act="hr-slip" data-id="${esc(id)}"><td><b>${esc(s.name)}</b><div class="sub">${esc([s.empNo, s.department].filter(Boolean).join(' · '))}${c.warnings.length ? ' · <span class="neg">check</span>' : ''}${!final && (() => { const a = autoLines(id, run.month, s); return a.earn.length + a.ded.length; })() ? ' · <span class="gold">attendance applied</span>' : ''}</div></td>
           <td class="num nowrap">${money(c.gross)}</td><td class="num nowrap">${money(c.paye)}</td><td class="num nowrap">${money(c.csgEe)}</td><td class="num nowrap">${money(c.nsfEe)}</td><td class="num nowrap">${c.otherDed ? money(c.otherDed) : '—'}</td>
           <td class="num nowrap"><b>${money(c.net)}</b></td><td class="num nowrap hide-sm">${money(c.employerCost)}</td>
           <td class="nowrap">${final ? `<a class="btn btn--ghost btn--sm" href="#payslip-${esc(run.month)}-${esc(id)}">Payslip</a>` : `<button class="btn btn--ghost btn--sm" data-act="hr-slip" data-id="${esc(id)}">${H.slipId === id ? 'Close' : 'Edit'}</button>`}</td></tr>
@@ -781,17 +818,10 @@ window.ZenHRModule = function (A) {
           <input id="sd-a-${i}" class="input num" inputmode="decimal" value="${esc(x.amount)}" data-bind="${b('deductions.' + i + '.amount')}" data-rr ${dis} aria-label="Amount">
           ${final ? '' : `<button type="button" class="btn btn--danger-ghost btn--sm" data-act="hr-line-del" data-id="${esc(id)}" data-k="deductions" data-i="${i}" aria-label="Remove">×</button>`}</div>`).join('') || '<div class="small muted">None</div>'}
         ${final ? '' : `<button type="button" class="btn btn--ghost btn--sm" data-act="hr-line-add" data-id="${esc(id)}" data-k="deductions">${icon('plus')} Add deduction (advance, loan, absence…)</button>`}
-        ${s.partial && !s.partial.done && !final ? (() => { const all = workingDays(run.month + '-01', monthEnd(run.month)), w = workingDays(s.partial.from, s.partial.to), bl = s.earnings.find((x) => x.kind === 'basic');
-          return `<div class="note small" style="margin-top:.8rem">Employed ${fmtD(s.partial.from)} – ${fmtD(s.partial.to)}: ${w} of ${all} working days this month. ${bl ? `<button type="button" class="btn btn--link" data-act="hr-prorate" data-id="${esc(id)}">Pro-rate basic to ${money(num(bl.amount) * w / Math.max(1, all))}</button>` : ''}</div>`; })() : ''}
-        ${!final ? (() => { const t = attSummary(id, run.month + '-01', monthEnd(run.month)), mm = main(), wd = Math.max(1, workingDays(run.month + '-01', monthEnd(run.month))), daily = c.basic / wd, hourly = daily / (Number(mm.hoursPerDay) || 8);
-          const missed = t.A + t.H * 0.5, otPay = Math.round(hourly * (Number(mm.otRate) || 1.5) * t.ot);
-          if (!missed && !t.ot && !t.L && !t.unmarked) return '';
-          const done = s.attDone || {};
-          return `<div class="note small" style="margin-top:.8rem"><b>Attendance:</b> ${[t.A ? t.A + ' absent' : '', t.H ? t.H + ' half day' + (t.H > 1 ? 's' : '') : '', t.L ? t.L + ' late (' + t.lateMin + ' min)' : '', t.ot ? money2(t.ot) + ' h overtime' : '', t.unmarked ? '<span class="neg">' + t.unmarked + ' day' + (t.unmarked > 1 ? 's' : '') + ' not marked</span>' : ''].filter(Boolean).join(' · ')}
-            ${missed && !done.absent ? `<br><button type="button" class="btn btn--link" data-act="hr-att-deduct" data-id="${esc(id)}" data-v="${Math.round(daily * missed)}" data-d="${missed}">Deduct ${money2(missed)} day${missed === 1 ? '' : 's'} absence: ${money(daily * missed)}</button>` : ''}
-            ${t.ot && !done.ot ? `<br><button type="button" class="btn btn--link" data-act="hr-att-ot" data-id="${esc(id)}" data-v="${otPay}" data-h="${t.ot}">Add ${money2(t.ot)} h overtime: ${money(otPay)}</button> <span class="muted">(hourly basic × ${esc(mm.otRate)})</span>` : ''}
-          </div>`; })() : ''}
-        ${s.unpaidDays && !final ? `<div class="note small" style="margin-top:.8rem">${money2(s.unpaidDays)} day${s.unpaidDays === 1 ? '' : 's'} of unpaid leave this month. <button type="button" class="btn btn--link" data-act="hr-unpaid" data-id="${esc(id)}">Deduct ${money(c.basic / Math.max(1, workingDays(run.month + '-01', monthEnd(run.month))) * s.unpaidDays)}</button> <span class="muted">(basic ÷ working days in the month × days)</span></div>` : ''}
+        ${(() => { const a = final ? { earn: s.earnings.filter((x) => x.auto), ded: (s.deductions || []).filter((x) => x.auto) } : autoLines(id, run.month, s), lines = a.earn.concat(a.ded.map((x) => Object.assign({}, x, { amount: -x.amount }))).map((x) => [x.amount < 0 ? '−' : '+', Object.assign({}, x, { amount: Math.abs(x.amount) })]);
+          return `<div class="auto"><div class="lbl">From attendance, leave and start/end dates <span class="muted" style="text-transform:none;letter-spacing:0">· worked out automatically</span></div>
+            ${lines.length ? lines.map(([sg, x]) => `<div class="auto__l"><span class="grow">${esc(x.label)}</span><b class="${sg === '−' ? 'neg' : ''}">${sg} ${money2(x.amount)}</b></div>`).join('') : `<div class="small muted">${s.noAuto ? 'Switched off for this person.' : 'Nothing to adjust this month.'}</div>`}
+            ${final ? '' : `<label class="check small" style="margin-top:.5rem"><input type="checkbox" id="se-noauto" data-bind="${b('noAuto')}" data-rr ${s.noAuto ? 'checked' : ''}> Don't adjust this person's pay from attendance</label>`}</div>`; })()}
         <div class="row wrap" style="gap:1rem;margin-top:1rem">
           <div class="field" style="width:170px"><label class="lbl" for="se-dep">Dependents</label><select id="se-dep" class="input" data-bind="${b('dependents')}" data-rr ${dis}>${[0, 1, 2, 3, 4].map((n) => opt(String(n), n === 0 ? 'None' : String(n), s.dependents)).join('')}</select></div>
           <div class="field" style="width:200px"><label class="lbl" for="se-rel">Other yearly reliefs (Rs)</label><input id="se-rel" class="input" inputmode="decimal" value="${esc(s.otherReliefs)}" data-bind="${b('otherReliefs')}" data-rr ${dis}></div>
@@ -818,8 +848,9 @@ window.ZenHRModule = function (A) {
   }
   function cleanSlip(s) {
     return Object.assign({}, s, {
-      earnings: s.earnings.map((x) => ({ label: String(x.label || '').trim() || 'Earning', amount: num(x.amount), kind: KINDS[x.kind] ? x.kind : 'other', taxable: x.taxable !== false })),
-      deductions: (s.deductions || []).map((x) => ({ label: String(x.label || '').trim() || 'Deduction', amount: num(x.amount) })),
+      earnings: s.earnings.filter((x) => !x.auto).map((x) => ({ label: String(x.label || '').trim() || 'Earning', amount: num(x.amount), kind: KINDS[x.kind] ? x.kind : 'other', taxable: x.taxable !== false })),
+      deductions: (s.deductions || []).filter((x) => !x.auto).map((x) => ({ label: String(x.label || '').trim() || 'Deduction', amount: num(x.amount) })),
+      noAuto: !!s.noAuto,
       dependents: Math.min(4, Math.max(0, Math.round(num(s.dependents)))), otherReliefs: num(s.otherReliefs),
     });
   }
@@ -845,7 +876,9 @@ window.ZenHRModule = function (A) {
     const run = H.run; if (!run) return;
     const slips = {};
     for (const [id, s] of Object.entries(run.slips)) {
-      const cs = cleanSlip(s), c = calcFor(Object.assign({ _id: id }, cs), run.month);
+      const cs = cleanSlip(s), a = autoLines(id, run.month, cs);
+      cs.earnings = cs.earnings.concat(a.earn); cs.deductions = cs.deductions.concat(a.ded);
+      const c = calcFor(Object.assign({ _id: id }, cs), run.month);
       if (!c) { toast('No tax rates for ' + run.taxYear + '.', 'error'); return; }
       cs.calc = c; slips[id] = cs;
     }
@@ -856,8 +889,9 @@ window.ZenHRModule = function (A) {
     } catch (e) { S.busy = false; fail(e); render(); }
   }
   function payslipView(month, id) {
-    const run = H.runs[month], s = run && run.slips && run.slips[id];
-    if (!s) return back('payroll', 'Payroll') + `<div class="panel empty">This payslip doesn't exist.</div>`;
+    const run = H.runs[month], s0 = run && run.slips && run.slips[id];
+    if (!s0) return back('payroll', 'Payroll') + `<div class="panel empty">This payslip doesn't exist.</div>`;
+    const s = run.status === 'final' ? s0 : withAuto(id, month, s0);
     const c = slipCalc(run, id); if (!c) return back('payrun-' + month, fmtM(month)) + `<div class="panel empty">No tax rates for ${esc(run.taxYear)}.</div>`;
     const e = H.emps[id] || {};
     return back('payrun-' + month, fmtM(month)) + `<div class="row no-print" style="justify-content:flex-end;gap:.5rem;margin-bottom:.8rem">
@@ -892,7 +926,7 @@ window.ZenHRModule = function (A) {
     allYears().forEach((y) => { const r = ratesFor(y); years[y] = JSON.parse(JSON.stringify(r)); });
     const cur = P.taxYearOf(today().slice(0, 7));
     return {
-      departments: m.departments.slice(), newDept: '', workDays: m.workDays.slice(), hoursPerDay: String(m.hoursPerDay ?? 8), otRate: String(m.otRate ?? 1.5), holidays: (m.holidays || []).map((h) => Object.assign({}, h)).sort((a, b) => a.date.localeCompare(b.date)), newHolDate: '', newHolName: '',
+      departments: m.departments.slice(), newDept: '', workDays: m.workDays.slice(), hoursPerDay: String(m.hoursPerDay ?? 8), otRate: String(m.otRate ?? 1.5), deductLate: !!m.deductLate, holidays: (m.holidays || []).map((h) => Object.assign({}, h)).sort((a, b) => a.date.localeCompare(b.date)), newHolDate: '', newHolName: '',
       leaveTypes: m.leaveTypes.map((t) => Object.assign({}, t, { days: String(t.days) })), onboardingText: m.onboarding.join('\n'), offboardingText: m.offboarding.join('\n'),
       years, ty: years[cur] ? cur : Object.keys(years).sort().pop(), err: '',
     };
@@ -912,7 +946,9 @@ window.ZenHRModule = function (A) {
         <div class="row wrap" style="gap:1rem;margin-bottom:1rem">
           <div class="field" style="width:170px"><label class="lbl" for="hs-hpd">Hours per day</label><input id="hs-hpd" class="input num" inputmode="decimal" value="${esc(d.hoursPerDay)}" data-bind="hr.set.hoursPerDay"></div>
           <div class="field" style="width:200px"><label class="lbl" for="hs-ot">Overtime rate (× hourly)</label><input id="hs-ot" class="input num" inputmode="decimal" value="${esc(d.otRate)}" data-bind="hr.set.otRate"></div>
+          <div class="field"><label class="lbl">Lateness</label><label class="check" style="padding-top:.45rem"><input type="checkbox" id="hs-late" data-bind="hr.set.deductLate" ${d.deductLate ? 'checked' : ''}> Deduct minutes late from pay</label></div>
         </div>
+        <div class="hint" style="margin:-.4rem 0 1rem">Payroll automatically deducts absences (a half day counts as half), unpaid leave and days before someone joined or after they left, and adds overtime. Day rate = basic ÷ working days in the month; hourly = day rate ÷ hours per day.</div>
         <div class="hint" style="margin-bottom:.6rem">Leave only counts working days. Add Mauritius public holidays each year so they aren't counted.</div>
         ${d.holidays.map((h, i) => `<div class="hr-item"><span class="nowrap" style="width:120px">${fmtD(h.date)}</span><span class="grow">${esc(h.name)}</span><button type="button" class="btn btn--danger-ghost btn--sm" data-act="hr-hol-del" data-i="${i}">Remove</button></div>`).join('') || '<div class="small muted">No public holidays added yet.</div>'}
         <div class="row wrap" style="margin-top:.7rem;gap:.5rem;max-width:560px"><input id="hs-hd" class="input" type="date" style="width:170px" value="${esc(d.newHolDate)}" data-bind="hr.set.newHolDate" aria-label="Date"><input id="hs-hn" class="input grow" maxlength="60" placeholder="e.g. Independence Day" value="${esc(d.newHolName)}" data-bind="hr.set.newHolName" aria-label="Holiday name"><button type="button" class="btn btn--ghost" data-act="hr-hol-add">Add</button></div>
@@ -971,7 +1007,7 @@ window.ZenHRModule = function (A) {
     try {
       const at = now(), by = S.me.id, batch = S.db.batch();
       batch.set(S.db.doc('meta/org'), { departments: d.departments, updatedAt: at, updatedBy: by });
-      batch.set(S.db.doc('hrSettings/main'), { hoursPerDay: num(d.hoursPerDay) || 8, otRate: num(d.otRate) || 1.5, workDays: d.workDays.slice().sort(), holidays: d.holidays, leaveTypes: leave, onboarding: lines(d.onboardingText), offboarding: lines(d.offboardingText), updatedAt: at, updatedBy: by });
+      batch.set(S.db.doc('hrSettings/main'), { hoursPerDay: num(d.hoursPerDay) || 8, otRate: num(d.otRate) || 1.5, deductLate: !!d.deductLate, workDays: d.workDays.slice().sort(), holidays: d.holidays, leaveTypes: leave, onboarding: lines(d.onboardingText), offboarding: lines(d.offboardingText), updatedAt: at, updatedBy: by });
       batch.set(S.db.doc('hrSettings/payroll'), { years, updatedAt: at, updatedBy: by });
       await batch.commit();
       S.busy = false; H.set = null; toast('HR settings saved.'); go('hr');

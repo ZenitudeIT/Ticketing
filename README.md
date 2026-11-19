@@ -54,7 +54,13 @@ Nobody else can open them, administrators included, unless they're added to that
   - **Mark the other N present** fills in everyone not yet marked.
   - Approved leave, weekends and public holidays fill in by themselves.
   - Month summary grid with totals and CSV export.
-  - In the pay run, absences and overtime are flagged with one-click buttons to deduct the absence (basic ÷ working days) or pay the overtime (hourly basic × the overtime rate in HR settings).
+  - **Pay follows attendance automatically.** Draft pay runs work out the adjustments as the register is filled in, and lock them in when the run is finalised:
+    - absences (half days count as half), unpaid leave, and days before someone joined or after they left come off basic pay, so PAYE, CSG and NSF follow what is actually paid;
+    - overtime is paid at hourly basic × the overtime rate;
+    - lateness is deducted only if switched on in HR settings.
+  - Day rate = basic ÷ working days in the month; hourly = day rate ÷ hours per day.
+  - HR can switch this off for one person on their payslip.
+- **Departments:** one shared list, edited by administrators on **Team & roles** or by HR in **HR settings**. Everyone's department is set on Team & roles or on their staff record.
 - **Payroll:** one pay run per month.
   - Everyone employed that month is added from their staff record. HR adjusts each person (overtime, bonus, deductions, pro-rating for mid-month joiners or leavers), then **finalises**.
   - A finalised run is locked and its payslips can be printed or saved as PDF. It can be reopened.
