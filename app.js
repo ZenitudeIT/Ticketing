@@ -433,7 +433,16 @@
   }
 
   /* ---------- render ---------- */
+  // Re-render safely: a redraw can make a focused box lose focus, which fires its
+  // change event and asks for another redraw; queue that one instead of nesting it.
+  let rendering = false, renderAgain = false;
   function render() {
+    if (rendering) { renderAgain = true; return; }
+    rendering = true;
+    try { draw(); } finally { rendering = false; }
+    if (renderAgain) { renderAgain = false; render(); }
+  }
+  function draw() {
     const app = document.getElementById('app');
     const ae = document.activeElement, fid = ae && ae.id;
     let sel = null;
@@ -1321,6 +1330,7 @@
       download: '<path d="M12 4v11M7 10l5 5 5-5M5 20h14"/>',
       desk: '<path d="M3 10h18M5 10V7a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2v3M6 10v9M18 10v9M9 14h6"/>',
       image: '<rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="9" cy="10" r="2"/><path d="m21 16-5-5-9 9"/>',
+      clock: '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
       heart: '<path d="M12 20s-7-4.4-7-10a4 4 0 0 1 7-2.6A4 4 0 0 1 19 10c0 5.6-7 10-7 10z"/>',
       calendar: '<rect x="3" y="5" width="18" height="16" rx="2"/><path d="M3 10h18M8 3v4M16 3v4"/>',
       cash: '<rect x="2.5" y="6" width="19" height="12" rx="2"/><circle cx="12" cy="12" r="2.5"/><path d="M6 9.5v5M18 9.5v5"/>',

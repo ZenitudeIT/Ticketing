@@ -49,6 +49,12 @@ Nobody else can open them, administrators included, unless they're added to that
   - Only working days count; set the working week and public holidays in HR settings.
   - Balances per calendar year, a month calendar, and CSV export.
   - Unpaid leave is flagged in payroll.
+- **Attendance:** a daily register that HR fills in.
+  - Each person is marked Present, Late (with minutes), Half day or Absent, plus overtime hours and a note.
+  - **Mark the other N present** fills in everyone not yet marked.
+  - Approved leave, weekends and public holidays fill in by themselves.
+  - Month summary grid with totals and CSV export.
+  - In the pay run, absences and overtime are flagged with one-click buttons to deduct the absence (basic ÷ working days) or pay the overtime (hourly basic × the overtime rate in HR settings).
 - **Payroll:** one pay run per month.
   - Everyone employed that month is added from their staff record. HR adjusts each person (overtime, bonus, deductions, pro-rating for mid-month joiners or leavers), then **finalises**.
   - A finalised run is locked and its payslips can be printed or saved as PDF. It can be reopened.
@@ -66,6 +72,7 @@ Nobody else can open them, administrators included, unless they're added to that
 | `meta/hr` | which desk runs the HR module |
 | `employees/{id}` (+ `/docs/{id}`, `/docs/{id}/content/full`) | staff records and their documents |
 | `leave/{id}` | leave records |
+| `attendance/{YYYY-MM-DD}` | daily register: one entry per employee |
 | `payruns/{YYYY-MM}` | one pay run per month with each person's payslip |
 | `hrSettings/main`, `hrSettings/payroll` | departments, working days, holidays, leave types, checklists; tax and contribution rates |
 

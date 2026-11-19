@@ -358,3 +358,18 @@ details.more summary { cursor: pointer; font-size: .84rem; color: var(--moss); f
   .payslip__net { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
 }
 .grid2 + .grid2 { margin-top: 1.1rem; }
+
+/* attendance */
+.mk { display: inline-flex; border: 1px solid var(--line-strong); border-radius: 999px; overflow: hidden; }
+.mk__b { border: 0; background: #fff; padding: .35rem .7rem; font: inherit; font-size: .78rem; cursor: pointer; color: var(--charcoal); border-right: 1px solid var(--line); }
+.mk__b:last-child { border-right: 0; }
+.mk__b:hover { background: var(--ivory); }
+.mk__b.on.mk--P { background: var(--moss-soft); color: #fff; }
+.mk__b.on.mk--L, .mk__b.on.mk--H { background: var(--gold); color: #fff; }
+.mk__b.on.mk--A { background: var(--danger); color: #fff; }
+.tbl.att td { vertical-align: middle; }
+.ak { display: inline-block; min-width: 18px; font-size: .7rem; font-weight: 600; line-height: 18px; border-radius: 4px; text-align: center; }
+.ak--P { color: var(--moss); } .ak--L, .ak--H { color: var(--gold-ink); background: var(--gold-tint); }
+.ak--A { color: #fff; background: var(--danger); } .ak--lv { color: var(--muted); background: var(--cream); font-size: .6rem; } .ak--no { color: var(--line-strong); }
+.att-cal sup { font-size: .55rem; color: var(--moss); display: block; line-height: 1; }
+@media (max-width: 860px) { .mk__b { padding: .35rem .5rem; } }

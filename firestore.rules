@@ -146,6 +146,9 @@ service cloud.firestore {
     match /leave/{lid} {
       allow read, create, update, delete: if isHR();
     }
+    match /attendance/{day} {
+      allow read, create, update, delete: if isHR();
+    }
     match /hrSettings/{sid} {
       allow read: if isHR();
       allow write: if isHR() && sid in ['main', 'payroll'];
