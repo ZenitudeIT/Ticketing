@@ -472,6 +472,7 @@
     const vis = visibleTickets();
     const act = vis.filter((t) => ACTIVE.includes(t.status)).length;
     const links = [['dashboard', 'Overview', 'grid'], ['tickets', isAgent() ? 'Tickets' : 'My tickets', 'list', act], ['new', 'New ticket', 'plus']];
+    if (HR) links.push(...HR.selfLinks());
     if (isAdmin()) links.push(['desks', 'Desks', 'desk'], ['users', 'Team & roles', 'users']);
     const on = (k) => (r === k || (k === 'tickets' && r.startsWith('ticket-')) || (k === 'desks' && r.startsWith('desk-')) || (HR && HR.navOn(k, r)) ? 'on' : '');
     const hrLinks = HR ? HR.links() : [];
@@ -1112,7 +1113,7 @@
 
   /* ---------- events ---------- */
   async function saveDepts(list, msg) {
-    try { await S.db.doc('meta/org').set({ departments: list, updatedAt: now(), updatedBy: S.me.id }); toast(msg); }
+    try { await S.db.doc('meta/org').set({ departments: list, updatedAt: now(), updatedBy: S.me.id }, { merge: true }); toast(msg); }
     catch (e) { fail(e); }
   }
   const actions = {

@@ -35,6 +35,16 @@ Desks are never deleted, only closed. The **IT** desk is created automatically t
 
 **Screenshots:** people can attach up to 5 images when raising a ticket or replying. They can click **Add screenshots**, paste with **Ctrl+V**, or drag images in. Each image is shrunk and compressed in the browser and stored in Firestore, so no Cloud Storage or paid plan is needed.
 
+## My leave (every staff member)
+Everyone has a **My leave** page in the menu where they can:
+- see their balance for each leave type (once HR has set up their staff record);
+- request sick, local/annual or any other leave, with an optional medical certificate (photo or PDF);
+- follow and cancel their requests while they're waiting.
+
+Requests appear on HR's **Leave** page with an Approve / Reject button and a count in the menu. HR can reply with a message the person sees. Approved leave counts in attendance and payroll automatically: paid leave isn't deducted, unpaid leave is.
+
+Staff only ever see their own requests and balance. HR's app keeps the balances up to date in `leaveBalances/{uid}`, and publishes the leave types, working days and holidays to `meta/org` so the request form can count working days.
+
 ## HR module: staff, leave and payroll
 On the **Desks** page, tick **HR desk** on one desk (normally HR). Its members get extra pages: **HR overview, Staff, Leave, Payroll** and **HR settings**.
 Nobody else can open them, administrators included, unless they're added to that desk. `firestore.rules` enforces this on Firebase's servers.

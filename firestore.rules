@@ -119,11 +119,15 @@ service cloud.firestore {
     }
 
     // Company-wide lists (departments). Everyone signed in can read; administrators and HR edit.
+    // Public lists: departments (admin or HR), and leave types / working days / holidays (HR) so staff can request leave.
     match /meta/org {
       allow read: if signedIn();
       allow write: if (isAdmin() || isHR())
-        && request.resource.data.keys().hasOnly(['departments', 'updatedAt', 'updatedBy'])
-        && request.resource.data.departments is list && request.resource.data.departments.size() <= 60
+        && request.resource.data.keys().hasOnly(['departments', 'leaveTypes', 'workDays', 'holidays', 'updatedAt', 'updatedBy'])
+        && (!('departments' in request.resource.data) || (request.resource.data.departments is list && request.resource.data.departments.size() <= 60))
+        && (isHR() || (request.resource.data.get('leaveTypes', null) == resource.data.get('leaveTypes', null)
+                       && request.resource.data.get('workDays', null) == resource.data.get('workDays', null)
+                       && request.resource.data.get('holidays', null) == resource.data.get('holidays', null)))
         && request.resource.data.updatedBy == request.auth.uid;
     }
 
@@ -143,8 +147,36 @@ service cloud.firestore {
         }
       }
     }
+    // Leave: HR sees and manages everything. Staff see their own, request leave (waiting for approval)
+    // and can cancel their own request while it's waiting.
     match /leave/{lid} {
-      allow read, create, update, delete: if isHR();
+      allow read: if isHR() || (signedIn() && resource.data.userId == request.auth.uid);
+      allow create: if isHR() || (active()
+        && request.resource.data.keys().hasOnly(['userId', 'empId', 'typeId', 'from', 'to', 'half', 'days', 'status', 'reason', 'requestedBy', 'hasFile', 'createdAt', 'createdBy', 'updatedAt', 'updatedBy'])
+        && request.resource.data.userId == request.auth.uid && request.resource.data.requestedBy == request.auth.uid
+        && request.resource.data.createdBy == request.auth.uid && request.resource.data.empId == ''
+        && request.resource.data.status == 'Pending'
+        && request.resource.data.from is string && request.resource.data.to is string && request.resource.data.from <= request.resource.data.to
+        && request.resource.data.days is number && request.resource.data.days > 0 && request.resource.data.days <= 366
+        && request.resource.data.reason is string && request.resource.data.reason.size() <= 300);
+      allow update: if isHR() || (active() && resource.data.userId == request.auth.uid && resource.data.requestedBy == request.auth.uid
+        && resource.data.status == 'Pending' && request.resource.data.status == 'Cancelled'
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'updatedAt', 'updatedBy']));
+      allow delete: if isHR();
+      // One attachment per request (e.g. medical certificate).
+      match /files/{fid} {
+        allow read: if isHR() || (signedIn() && get(/databases/$(database)/documents/leave/$(lid)).data.userId == request.auth.uid);
+        allow create: if (isHR() || (active() && getAfter(/databases/$(database)/documents/leave/$(lid)).data.userId == request.auth.uid))
+          && fid == 'main' && request.resource.data.keys().hasOnly(['name', 'type', 'data'])
+          && request.resource.data.data is string && request.resource.data.data.size() < 1000000;
+        allow delete: if isHR();
+        allow update: if false;
+      }
+    }
+    // Each person's leave balances, kept up to date by HR's app. People see only their own.
+    match /leaveBalances/{uid} {
+      allow read: if isHR() || (signedIn() && request.auth.uid == uid);
+      allow write: if isHR();
     }
     match /attendance/{day} {
       allow read, create, update, delete: if isHR();

@@ -5,7 +5,10 @@
  *
  * Data:
  *   employees/{id}                 staff record (+ /docs/{did} and /docs/{did}/content/full for files)
- *   leave/{id}                     leave records
+ *   leave/{id}                     leave records (HR-recorded, or requested by staff on My leave: userId, status Pending)
+ *   leave/{id}/files/main          optional attachment on a request (e.g. medical certificate)
+ *   leaveBalances/{uid}            each person's balances, written by HR's app so staff can see their own
+ *   meta/org                       public lists: departments, leave types (name/paid), working days, holidays
  *   attendance/{YYYY-MM-DD}        daily register: marks[employeeId] = { s: P|L|H|A, late, ot, note }
  *   payruns/{YYYY-MM}              one pay run per month, with every employee's payslip
  *   hrSettings/main                departments, working days, holidays, leave types, checklists
@@ -68,7 +71,8 @@ window.ZenHRModule = function (A) {
   const money2 = (n) => (Number(n) || 0).toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 2 });
   const uid = () => Math.random().toString(36).slice(2, 10);
   const emp = (id) => H.emps[id];
-  const empName = (id) => (H.emps[id] ? H.emps[id].fullName : 'Former employee');
+  const empName = (id) => (H.emps[id] ? H.emps[id].fullName : String(id).startsWith('u:') ? ((S.users[id.slice(2)] || {}).name || 'Unknown') + ' (no HR record)' : 'Former employee');
+  const empByUser = (uid) => { for (const [id, e] of Object.entries(H.emps)) if (e.userId === uid) return id; return ''; };
   const empList = () => Object.entries(H.emps).map(([id, e]) => Object.assign({ id }, e)).sort((a, b) => (a.fullName || '').localeCompare(b.fullName || ''));
   const activeEmps = () => empList().filter((e) => e.status !== 'Left');
   const main = () => Object.assign({}, DEFAULT_MAIN, H.main || {}, { departments: A.deptList() });
@@ -95,9 +99,9 @@ window.ZenHRModule = function (A) {
   }
 
   // Working days between two dates (inclusive), skipping non-working weekdays and public holidays.
-  function workingDays(from, to, half) {
+  function workingDays(from, to, half, cal) {
     if (!from || !to || to < from) return 0;
-    const m = main(), hol = new Set((m.holidays || []).map((h) => h.date));
+    const m = cal || main(), hol = new Set((m.holidays || []).map((h) => h.date));
     let n = 0;
     for (let d = from; d <= to; d = addDays(d, 1)) if (m.workDays.includes(parseD(d).getDay()) && !hol.has(d)) n++;
     return half && from === to ? Math.min(n, 0.5) : n;
@@ -109,7 +113,9 @@ window.ZenHRModule = function (A) {
     if (a === l.from && b === l.to) return Number(l.days) || 0;
     return workingDays(a, b, false);
   }
-  const leaveArr = () => Object.entries(H.leave).map(([id, l]) => Object.assign({ id }, l));
+  // Requests made by staff carry their account (userId); match them to their HR record.
+  const leaveArr = () => Object.entries(H.leave).map(([id, l]) => Object.assign({ id }, l, { empId: l.empId || (l.userId ? empByUser(l.userId) || 'u:' + l.userId : '') }));
+  const leaveById = (id) => leaveArr().find((l) => l.id === id);
   function usedDays(empId, typeId, year) {
     const s = year + '-01-01', e = year + '-12-31';
     return leaveArr().filter((l) => l.empId === empId && l.typeId === typeId && l.status === 'Approved').reduce((t, l) => t + daysWithin(l, s, e), 0);
@@ -146,24 +152,67 @@ window.ZenHRModule = function (A) {
     catch (e) { fail(e); }
   }
 
+  /* ---------- My leave (every signed-in person) ---------- */
+  const MY = (S.myLeave = { on: false, unsub: {}, leave: {}, bal: null, loaded: false, form: null, busy: false });
+  const pub = () => { const o = S.org || {}; return { workDays: o.workDays || DEFAULT_MAIN.workDays, holidays: o.holidays || [], leaveTypes: o.leaveTypes || DEFAULT_MAIN.leaveTypes.map(({ id, name, paid }) => ({ id, name, paid })) }; };
+  function startSelf() {
+    if (MY.on || !S.user) return;
+    MY.on = true;
+    const uid = S.user.uid;
+    MY.unsub.l = S.db.collection('leave').where('userId', '==', uid).onSnapshot((q) => { const o = {}; q.docs.forEach((d) => { o[d.id] = d.data(); }); MY.leave = o; MY.loaded = true; render(); },
+      (e) => { console.error('[Zenitude HR] my leave', e); MY.loaded = true; MY.err = dbMsg(e); render(); });
+    MY.unsub.b = S.db.collection('leaveBalances').doc(uid).onSnapshot((d) => { MY.bal = d.exists ? d.data() : null; render(); }, (e) => { console.error('[Zenitude HR] my balance', e); });
+  }
+  function stopSelf() { Object.values(MY.unsub).forEach((u) => { try { u(); } catch (e) { } }); Object.assign(MY, { on: false, unsub: {}, leave: {}, bal: null, loaded: false, form: null, err: '' }); }
+
   /* ---------- live data ---------- */
   function start() {
     if (H.on) return;
     H.on = true; H.err = ''; H.loaded = {};
     const db = S.db, onErr = (k) => (e) => { console.error('[Zenitude HR] ' + k, e); H.err = 'HR data couldn\'t load: ' + dbMsg(e) + (e && e.code ? ' [' + e.code + ']' : ''); H.loaded[k] = true; render(); };
-    H.unsub.e = db.collection('employees').onSnapshot((s) => { const o = {}; s.docs.forEach((d) => { o[d.id] = d.data(); }); H.emps = o; H.loaded.e = true; refreshDrafts(); render(); }, onErr('e'));
-    H.unsub.l = db.collection('leave').onSnapshot((s) => { const o = {}; s.docs.forEach((d) => { o[d.id] = d.data(); }); H.leave = o; H.loaded.l = true; render(); }, onErr('l'));
-    H.unsub.s = db.collection('hrSettings').onSnapshot((s) => { H.main = null; H.pay = null; s.docs.forEach((d) => { if (d.id === 'main') H.main = d.data(); if (d.id === 'payroll') H.pay = d.data(); }); H.loaded.s = true; render(); }, onErr('s'));
+    H.unsub.e = db.collection('employees').onSnapshot((s) => { const o = {}; s.docs.forEach((d) => { o[d.id] = d.data(); }); H.emps = o; H.loaded.e = true; refreshDrafts(); schedulePublish(); render(); }, onErr('e'));
+    H.unsub.l = db.collection('leave').onSnapshot((s) => { const o = {}; s.docs.forEach((d) => { o[d.id] = d.data(); }); H.leave = o; H.loaded.l = true; schedulePublish(); render(); }, onErr('l'));
+    H.unsub.s = db.collection('hrSettings').onSnapshot((s) => { H.main = null; H.pay = null; s.docs.forEach((d) => { if (d.id === 'main') H.main = d.data(); if (d.id === 'payroll') H.pay = d.data(); }); H.loaded.s = true; schedulePublish(); render(); }, onErr('s'));
+    H.unsub.b = db.collection('leaveBalances').onSnapshot((s) => { const o = {}; s.docs.forEach((d) => { o[d.id] = balKey(d.data().types, d.data().year); }); H.balSeen = o; H.loaded.b = true; schedulePublish(); }, onErr('b'));
     H.unsub.a = db.collection('attendance').where('date', '>=', addDays(today(), -430)).onSnapshot((s) => { const o = {}; s.docs.forEach((d) => { o[d.id] = d.data(); }); H.att = o; H.loaded.a = true; render(); }, onErr('a'));
     H.unsub.r = db.collection('payruns').onSnapshot((s) => { const o = {}; s.docs.forEach((d) => { o[d.id] = d.data(); }); H.runs = o; H.loaded.r = true; refreshDrafts(); render(); }, onErr('r'));
   }
-  function stop() {
+  function stop() { stopHR(); stopSelf(); }
+  function stopHR() {
+    clearTimeout(H.pubT);
     Object.values(H.unsub).forEach((u) => { try { u(); } catch (e) { } });
     if (H.docsSub) { try { H.docsSub(); } catch (e) { } }
     Object.assign(H, { on: false, unsub: {}, err: '', loaded: {}, emps: {}, leave: {}, runs: {}, att: {}, main: null, pay: null, ed: null, docs: {}, docsSub: null, docsFor: null, run: null, runSrc: '', slipId: null, set: null });
   }
-  function sync() { if (S.phase === 'ready' && isHR()) start(); else if (H.on) stop(); }
+  function sync() {
+    if (S.phase === 'ready') startSelf();
+    if (S.phase === 'ready' && isHR()) start(); else if (H.on) stopHR();
+  }
   // Keep open drafts in step with the database when they haven't been edited.
+  // Keep what staff can see up to date: their own balances, the public leave/holiday lists,
+  // and the account link on older leave records. Only writes what changed.
+  const balKey = (types, yr) => (types || []).map((t) => [t.id, t.name, !!t.paid, t.ent, t.used, t.pending].join(':')).join(';') + '|' + yr;
+  const typesKey = (l) => (l || []).map((t) => [t.id, t.name, !!t.paid].join(':')).join(';');
+  const holKey = (l) => (l || []).map((h) => h.date + ':' + h.name).join(';');
+  function schedulePublish() { clearTimeout(H.pubT); H.pubT = setTimeout(publish, 1500); }
+  async function publish() {
+    if (!H.on || !loaded() || !H.loaded.b) return;
+    const yr = today().slice(0, 4), m = main(), writes = [];
+    const org = S.org || {}, pubTypes = leaveTypes().map(({ id, name, paid }) => ({ id, name, paid: !!paid }));
+    if (!org.leaveTypes || typesKey(org.leaveTypes) !== typesKey(pubTypes) || String(org.workDays || '') !== String(m.workDays) || holKey(org.holidays) !== holKey(m.holidays))
+      writes.push([S.db.doc('meta/org'), { leaveTypes: pubTypes, workDays: m.workDays, holidays: m.holidays || [], updatedAt: now(), updatedBy: S.me.id }, true]);
+    empList().filter((e) => e.userId && e.status !== 'Left').forEach((e) => {
+      const types = leaveTypes().map((t) => { const ent = entitlement(e, t), used = usedDays(e.id, t.id, yr);
+        const pend = leaveArr().filter((l) => l.empId === e.id && l.typeId === t.id && l.status === 'Pending').reduce((n, l) => n + daysWithin(l, yr + '-01-01', yr + '-12-31'), 0);
+        return { id: t.id, name: t.name, paid: !!t.paid, ent, used, pending: pend }; });
+      if ((H.balSeen || {})[e.userId] !== balKey(types, yr)) writes.push([S.db.collection('leaveBalances').doc(e.userId), { year: yr, types, updatedAt: now() }]);
+    });
+    Object.entries(H.leave).forEach(([id, l]) => { const e = l.empId && H.emps[l.empId]; if (e && e.userId && !l.userId) writes.push([S.db.collection('leave').doc(id), { userId: e.userId }, true]); });
+    for (let i = 0; i < writes.length; i += 400) {
+      const b = S.db.batch(); writes.slice(i, i + 400).forEach(([r, d, merge]) => (merge ? b.set(r, d, { merge: true }) : b.set(r, d)));
+      try { await b.commit(); } catch (e) { console.error('[Zenitude HR] publish', e); return; }
+    }
+  }
   function refreshDrafts() {
     const r = S.route;
     if (r.startsWith('payrun-') && H.run && H.runs[H.run.month] && !runDirty()) copyRun(H.run.month);
@@ -180,7 +229,7 @@ window.ZenHRModule = function (A) {
   }
 
   /* ---------- routing ---------- */
-  const owns = (r) => r === 'hr' || r === 'staff' || r.startsWith('staff-') || r === 'leave' || r === 'attendance' || r === 'payroll' || r.startsWith('payrun-') || r.startsWith('payslip-') || r === 'hr-settings';
+  const owns = (r) => r === 'my-leave' || r === 'hr' || r === 'staff' || r.startsWith('staff-') || r === 'leave' || r === 'attendance' || r === 'payroll' || r.startsWith('payrun-') || r.startsWith('payslip-') || r === 'hr-settings';
   function prepare(r) {
     if (!r.startsWith('staff-')) { H.ed = null; watchDocs(null); }
     if (!r.startsWith('payrun-')) { H.run = null; H.runSrc = ''; H.slipId = null; }
@@ -192,6 +241,7 @@ window.ZenHRModule = function (A) {
     if (r === 'hr-settings' && !H.set) H.set = setFrom();
     if (!H.at.date) { H.at.date = today(); H.at.month = today().slice(0, 7); }
   }
+  const selfLinks = () => [['my-leave', 'My leave', 'calendar', Object.values(MY.leave).filter((l) => l.status === 'Pending').length]];
   function links() {
     if (!isHR()) return [];
     const pending = H.on ? leaveArr().filter((l) => l.status === 'Pending').length : 0;
@@ -202,6 +252,7 @@ window.ZenHRModule = function (A) {
     return r === k || (k === 'staff' && r.startsWith('staff-')) || (k === 'payroll' && (r.startsWith('payrun-') || r.startsWith('payslip-')));
   }
   function view(r) {
+    if (r === 'my-leave') return myLeaveView();
     if (!isHR()) return `<div class="panel empty">These pages are for the HR desk. ${A.isAdmin() ? 'Tick <b>HR desk</b> on the <a href="#desks">Desks</a> page, and add yourself as a member if you need access.' : ''}</div>`;
     if (!H.on) start();
     const err = H.err ? `<div class="banner banner--bad">${esc(H.err)}</div>` : '';
@@ -531,11 +582,88 @@ window.ZenHRModule = function (A) {
     } catch (e) { if (S.modal && S.modal.did === did) { S.modal.err = dbMsg(e); render(); } }
   }
 
+  async function openFile(path) {
+    S.modal = { type: 'hr-doc', path, name: 'Attachment', kind: '', url: null, err: '', readOnly: true }; render();
+    try {
+      const d = await S.db.doc(path).get();
+      if (!S.modal || S.modal.path !== path) return;
+      if (!d.exists) { S.modal.err = 'The attachment is no longer available.'; return render(); }
+      const f = d.data(); S.modal.name = f.name || 'Attachment'; S.modal.kind = f.type || '';
+      S.modal.url = URL.createObjectURL(dataUrlToBlob(f.data)); render();
+    } catch (e) { if (S.modal && S.modal.path === path) { S.modal.err = dbMsg(e); render(); } }
+  }
+  async function readUpload(f) {
+    if (/^image\//.test(f.type)) { const p = await prepareImage(f); return { name: p.name, type: 'image/jpeg', data: p.full }; }
+    if (f.type === 'application/pdf' || /\.pdf$/i.test(f.name || '')) {
+      let data = await new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(r.result); r.onerror = () => rej(new Error('could not be read')); r.readAsDataURL(f); });
+      if (!/^data:application\/pdf/.test(data)) data = 'data:application/pdf;base64,' + data.split(',')[1];
+      if (data.length > MAX_DOC_CHARS) throw new Error('is too large (about 650 KB is the limit). Take a photo of it instead');
+      return { name: (f.name || 'document.pdf').slice(0, 140), type: 'application/pdf', data };
+    }
+    throw new Error('must be a PDF or a photo');
+  }
+
+  /* ---------- My leave (staff self-service) ---------- */
+  function myLeaveView() {
+    const P0 = pub(), b = MY.bal, yr = today().slice(0, 4), f = MY.form;
+    const mine = Object.entries(MY.leave).map(([id, l]) => Object.assign({ id }, l)).sort((a, c) => c.from.localeCompare(a.from));
+    const tname = (id) => (P0.leaveTypes.find((t) => t.id === id) || { name: id }).name;
+    const cards = b && b.year === yr ? b.types.filter((t) => t.ent > 0 || t.used > 0 || t.pending > 0).map((t) => `<div class="panel kpi"><div class="kpi__k">${esc(t.name)}</div>
+        <div class="kpi__v">${t.ent > 0 ? money2(t.ent - t.used) : money2(t.used)}</div><div class="kpi__s">${t.ent > 0 ? `left of ${money2(t.ent)} this year` : 'days taken this year'}${t.pending ? ` · ${money2(t.pending)} waiting` : ''}</div></div>`).join('') : '';
+    let form = '';
+    if (f) {
+      const days = workingDays(f.from, f.to, f.half, P0), t = P0.leaveTypes.find((x) => x.id === f.typeId) || {};
+      const bt = b && b.year === yr ? b.types.find((x) => x.id === f.typeId) : null;
+      const clash = mine.find((l) => ['Pending', 'Approved'].includes(l.status) && l.from <= f.to && l.to >= f.from);
+      form = `<form class="panel" data-form="my-leave-send" style="margin-bottom:1.1rem"><div class="panel__h"><h2>Request leave</h2></div><div class="panel__b">
+        <div class="g2">
+          <div class="field"><label class="lbl" for="ml-t">Type of leave</label><select id="ml-t" class="input" data-bind="myLeave.form.typeId" data-rr>${P0.leaveTypes.map((x) => opt(x.id, x.name + (x.paid ? '' : ' (unpaid)'), f.typeId)).join('')}</select></div>
+          <div></div>
+          <div class="field"><label class="lbl" for="ml-f">From</label><input id="ml-f" class="input" type="date" value="${esc(f.from)}" data-bind="myLeave.form.from" data-rr></div>
+          <div class="field"><label class="lbl" for="ml-to">To</label><input id="ml-to" class="input" type="date" value="${esc(f.to)}" data-bind="myLeave.form.to" data-rr></div>
+        </div>
+        ${f.from && f.from === f.to ? `<label class="check" style="margin-bottom:.8rem"><input type="checkbox" id="ml-h" data-bind="myLeave.form.half" data-rr ${f.half ? 'checked' : ''}> Half day</label>` : ''}
+        <div class="note small" style="margin-bottom:.9rem"><b>${money2(days)} working day${days === 1 ? '' : 's'}</b>${bt && bt.ent > 0 ? ` · you'd have ${money2(bt.ent - bt.used - bt.pending - days)} ${esc(bt.name.toLowerCase())} days left` : ''}${t.paid === false ? ' · <b>unpaid</b>: this is taken off your pay' : ''}</div>
+        ${clash ? `<div class="banner banner--bad small" style="margin-bottom:.8rem">You already have ${esc(tname(clash.typeId).toLowerCase())} ${clash.status === 'Pending' ? 'waiting for approval' : 'booked'} on some of these days.</div>` : ''}
+        <div class="field"><label class="lbl" for="ml-r">Reason</label><textarea id="ml-r" class="input" rows="2" maxlength="300" data-bind="myLeave.form.reason" placeholder="Optional for annual leave. For sick leave, a few words is enough.">${esc(f.reason)}</textarea></div>
+        <div class="field"><span class="lbl">Attachment <span class="muted" style="text-transform:none;letter-spacing:0">(optional)</span></span>
+          ${f.file ? `<div class="hr-item"><span class="grow">${esc(f.file.name)}</span><button type="button" class="btn btn--danger-ghost btn--sm" data-act="my-leave-unfile">Remove</button></div>`
+            : `<label class="btn btn--ghost btn--sm att__btn">${icon('image')} Add a medical certificate or document<input type="file" accept="application/pdf,image/*" data-myfile="1"></label>`}
+          <div class="hint">A photo or PDF. For sick leave, attach your medical certificate if you have one.</div></div>
+        ${f.err ? `<div class="err">${esc(f.err)}</div>` : ''}
+        <div class="row" style="justify-content:flex-end;gap:.6rem"><button type="button" class="btn btn--ghost" data-act="my-leave-close">Cancel</button><button class="btn btn--primary" type="submit" ${MY.busy ? 'disabled' : ''}>${MY.busy ? 'Sending…' : 'Send to HR'}</button></div>
+      </div></form>`;
+    }
+    return `<div class="head"><div class="grow"><div class="eyebrow">Leave</div><h1>My leave</h1><p>Request sick leave, local leave and other time off. HR approves it here and you'll see the answer below.</p></div>
+      ${f ? '' : `<button class="btn btn--primary" data-act="my-leave-new">${icon('plus')} Request leave</button>`}</div>
+      ${MY.err ? `<div class="banner banner--bad">${esc(MY.err)}</div>` : ''}
+      ${cards ? `<div class="kpis">${cards}</div>` : `<div class="banner banner--info">Your leave balance shows here once HR has set up your staff record.</div>`}
+      ${form}
+      <div class="panel"><div class="panel__h"><h2>My requests</h2></div>
+      ${!MY.loaded ? '<div class="empty">Loading…</div>' : mine.length ? `<div class="tbl-wrap"><table class="tbl"><thead><tr><th>Type</th><th>Dates</th><th class="num">Days</th><th>Status</th><th>Notes</th><th></th></tr></thead><tbody>
+        ${mine.map((l) => `<tr><td>${esc(tname(l.typeId))}</td><td class="nowrap">${fmtD(l.from)}${l.to !== l.from ? ' – ' + fmtD(l.to) : l.half ? ' (half day)' : ''}</td><td class="num">${money2(l.days)}</td>
+          <td>${pillHR(l.status === 'Pending' ? 'Waiting' : l.status)}${l.decidedBy && l.status !== 'Pending' && l.status !== 'Cancelled' ? `<div class="sub">by ${esc(name(l.decidedBy))}</div>` : ''}</td>
+          <td class="small t2" style="max-width:280px">${esc(l.reason || '')}${l.hrNote ? `<div><b>HR:</b> ${esc(l.hrNote)}</div>` : ''}${l.requestedBy ? '' : '<div class="muted">Recorded by HR</div>'}</td>
+          <td>${l.status === 'Pending' && l.requestedBy === S.user.uid ? `<button class="btn btn--ghost btn--sm" data-act="my-leave-cancel" data-id="${esc(l.id)}">Cancel</button>` : ''}</td></tr>`).join('')}
+      </tbody></table></div>` : '<div class="empty">No leave yet.</div>'}</div>`;
+  }
+  async function sendMyLeave() {
+    const f = MY.form, P0 = pub(), days = workingDays(f.from, f.to, f.half, P0);
+    f.err = !f.from || !f.to ? 'Choose the dates.' : f.to < f.from ? 'The end date is before the start date.' : days <= 0 ? 'Those dates are weekends or public holidays.' : '';
+    if (f.err) return render();
+    MY.busy = true; render();
+    const at = now(), uid = S.user.uid, ref = S.db.collection('leave').doc(), b = S.db.batch();
+    b.set(ref, { userId: uid, empId: '', typeId: f.typeId, from: f.from, to: f.to, half: !!(f.half && f.from === f.to), days, status: 'Pending', reason: (f.reason || '').trim(), requestedBy: uid, hasFile: !!f.file, createdAt: at, createdBy: uid, updatedAt: at, updatedBy: uid });
+    if (f.file) b.set(ref.collection('files').doc('main'), f.file);
+    try { await b.commit(); MY.busy = false; MY.form = null; toast('Sent to HR. You\'ll see their answer here.'); render(); }
+    catch (e) { MY.busy = false; f.err = dbMsg(e); render(); }
+  }
+
   /* ---------- leave ---------- */
   function leaveModalFrom(l, empId) {
     const t = today();
-    return l ? { type: 'hr-leave', id: l.id, empId: l.empId, typeId: l.typeId, from: l.from, to: l.to, half: !!l.half, reason: l.reason || '', status: l.status, err: '' }
-      : { type: 'hr-leave', id: null, empId: empId || '', typeId: 'annual', from: t, to: t, half: false, reason: '', status: 'Approved', err: '' };
+    return l ? { type: 'hr-leave', id: l.id, empId: l.empId, typeId: l.typeId, from: l.from, to: l.to, half: !!l.half, reason: l.reason || '', status: l.status, hrNote: l.hrNote || '', requestedBy: l.requestedBy || '', hasFile: !!l.hasFile, err: '' }
+      : { type: 'hr-leave', id: null, empId: empId || '', typeId: 'annual', from: t, to: t, half: false, reason: '', status: 'Approved', hrNote: '', err: '' };
   }
   function leaveView() {
     const L = H.lv;
@@ -555,9 +683,9 @@ window.ZenHRModule = function (A) {
       <select id="lv-yr" class="input" data-bind="hr.lv.year" data-rr aria-label="Year">${years.map((y) => opt(y, y, L.year)).join('')}</select>
     </div>
     ${list.length ? `<div class="tbl-wrap"><table class="tbl"><thead><tr><th>Employee</th><th>Type</th><th>Dates</th><th class="num">Days</th><th>Status</th><th>Reason</th><th></th></tr></thead><tbody>
-      ${list.map((l) => `<tr><td><a class="ttl" href="#staff-${esc(l.empId)}">${esc(empName(l.empId))}</a></td><td>${esc(ltype(l.typeId).name)}</td>
+      ${list.map((l) => `<tr><td><a class="ttl" href="#${String(l.empId).startsWith('u:') ? 'staff' : 'staff-' + esc(l.empId)}">${esc(empName(l.empId))}</a>${l.requestedBy ? `<div class="sub">requested ${esc(rel(l.createdAt))}</div>` : ''}</td><td>${esc(ltype(l.typeId).name)}${l.hasFile ? `<div><button class="btn btn--link small" data-act="hr-leave-file" data-id="${esc(l.id)}">${icon('image')} Attachment</button></div>` : ''}</td>
         <td class="nowrap">${fmtD(l.from)}${l.to !== l.from ? ' – ' + fmtD(l.to) : l.half ? ' (half day)' : ''}</td><td class="num">${money2(l.days)}</td><td>${pillHR(l.status)}</td>
-        <td class="small t2" style="max-width:260px">${esc(l.reason || '')}</td>
+        <td class="small t2" style="max-width:260px">${esc(l.reason || '')}${l.hrNote ? `<div class="muted">HR: ${esc(l.hrNote)}</div>` : ''}</td>
         <td class="nowrap">${l.status === 'Pending' ? `<button class="btn btn--primary btn--sm" data-act="hr-leave-set" data-id="${esc(l.id)}" data-v="Approved">Approve</button> <button class="btn btn--ghost btn--sm" data-act="hr-leave-set" data-id="${esc(l.id)}" data-v="Rejected">Reject</button> ` : ''}<button class="btn btn--ghost btn--sm" data-act="hr-leave-edit" data-id="${esc(l.id)}">Edit</button></td></tr>`).join('')}
     </tbody></table></div>` : `<div class="empty">${L.status === 'Pending' ? 'No leave waiting for approval.' : 'No leave records here.'}</div>`}</div>`;
   }
@@ -572,7 +700,7 @@ window.ZenHRModule = function (A) {
       <span class="grow"></span>${leaveTypes().map((t) => `<span class="small nowrap"><i class="lsw ${color(t.id)}"></i>${esc(t.name)}</span>`).join(' ')}</div>
       ${ids.length ? `<div class="tbl-wrap"><table class="cal"><thead><tr><th class="cal__n">Employee</th>${days.map((d) => { const w = parseD(d).getDay(), off = !mm.workDays.includes(w) || hol[d];
         return `<th class="${off ? 'off' : ''} ${d === today() ? 'now' : ''}" title="${esc(hol[d] || '')}">${WEEK[w][0]}<br>${Number(d.slice(8))}</th>`; }).join('')}</tr></thead><tbody>
-        ${ids.map((id) => `<tr><td class="cal__n"><a href="#staff-${esc(id)}">${esc(empName(id))}</a></td>${days.map((d) => { const l = ls.find((x) => x.empId === id && x.from <= d && x.to >= d), w = parseD(d).getDay(), off = !mm.workDays.includes(w) || hol[d];
+        ${ids.map((id) => `<tr><td class="cal__n"><a href="#${String(id).startsWith('u:') ? 'staff' : 'staff-' + esc(id)}">${esc(empName(id))}</a></td>${days.map((d) => { const l = ls.find((x) => x.empId === id && x.from <= d && x.to >= d), w = parseD(d).getDay(), off = !mm.workDays.includes(w) || hol[d];
           return `<td class="${off ? 'off' : ''}">${l ? `<i class="lb ${color(l.typeId)} ${l.status === 'Pending' ? 'pend' : ''}" title="${esc(ltype(l.typeId).name + (l.status === 'Pending' ? ' (waiting for approval)' : ''))}"></i>` : ''}</td>`; }).join('')}</tr>`).join('')}
       </tbody></table></div>` : '<div class="empty">Nobody has leave this month.</div>'}
       ${Object.keys(hol).filter((d) => d >= first && d <= last).length ? `<div class="panel__b small t2">Public holidays: ${Object.entries(hol).filter(([d]) => d >= first && d <= last).map(([d, n]) => fmtD(d) + ' ' + esc(n)).join(' · ')}</div>` : ''}
@@ -596,7 +724,9 @@ window.ZenHRModule = function (A) {
     const used = e ? usedDays(m.empId, m.typeId, yr) - (m.id && H.leave[m.id] && H.leave[m.id].status === 'Approved' && H.leave[m.id].typeId === m.typeId ? daysWithin(H.leave[m.id], yr + '-01-01', yr + '-12-31') : 0) : 0;
     const clash = m.empId && leaveArr().find((l) => l.id !== m.id && l.empId === m.empId && ['Approved', 'Pending'].includes(l.status) && l.from <= m.to && l.to >= m.from);
     return `<form data-form="hr-leave-save"><div class="modal" data-act="overlay"><div class="modal__box" role="dialog" aria-modal="true"><div class="modal__head"><h3>${m.id ? 'Edit leave' : 'Record leave'}</h3></div><div class="modal__body">
-      <div class="field"><label class="lbl" for="lm-e">Employee</label><select id="lm-e" class="input" data-bind="modal.empId" data-rr>${opt('', 'Choose…', m.empId)}${emps.concat(m.empId && e && e.status === 'Left' ? [Object.assign({ id: m.empId }, e)] : []).map((x) => opt(x.id, x.fullName, m.empId)).join('')}</select></div>
+      ${m.requestedBy ? `<div class="note small" style="margin-bottom:.9rem">Requested by <b>${esc(name(m.requestedBy))}</b> on My leave.${m.hasFile ? ` <button type="button" class="btn btn--link" data-act="hr-leave-file" data-id="${esc(m.id)}">See attachment</button>` : ''}</div>` : ''}
+      ${String(m.empId).startsWith('u:') ? `<div class="banner banner--bad small" style="margin-bottom:.8rem">${esc(name(m.empId.slice(2)))} has no HR record yet, so their balance can't be checked. You can approve or reject and send a message; to change the dates, first <a href="#staff">set up their record</a>.</div>` : ''}
+      <div class="field"><label class="lbl" for="lm-e">Employee</label><select id="lm-e" class="input" data-bind="modal.empId" data-rr>${opt('', 'Choose…', m.empId)}${String(m.empId).startsWith('u:') ? opt(m.empId, empName(m.empId), m.empId) : ''}${emps.concat(m.empId && e && e.status === 'Left' ? [Object.assign({ id: m.empId }, e)] : []).map((x) => opt(x.id, x.fullName, m.empId)).join('')}</select></div>
       <div class="field"><label class="lbl" for="lm-t">Type</label><select id="lm-t" class="input" data-bind="modal.typeId" data-rr>${leaveTypes().map((x) => opt(x.id, x.name + (x.paid ? '' : ' (unpaid)'), m.typeId)).join('')}</select></div>
       <div class="row" style="gap:.8rem"><div class="field grow"><label class="lbl" for="lm-f">From</label><input id="lm-f" class="input" type="date" value="${esc(m.from)}" data-bind="modal.from" data-rr></div>
         <div class="field grow"><label class="lbl" for="lm-to">To</label><input id="lm-to" class="input" type="date" value="${esc(m.to)}" data-bind="modal.to" data-rr></div></div>
@@ -604,16 +734,24 @@ window.ZenHRModule = function (A) {
       <div class="note small" style="margin-bottom:.9rem"><b>${money2(days)} working day${days === 1 ? '' : 's'}</b>${e && ent > 0 ? ` · ${esc(t.name)} left in ${yr} after this: <b class="${ent - used - (m.status === 'Approved' ? days : 0) < 0 ? 'neg' : ''}">${money2(ent - used - (m.status === 'Approved' ? days : 0))}</b> of ${money2(ent)}` : ''}</div>
       ${clash ? `<div class="banner banner--bad small" style="margin-bottom:.8rem">Overlaps with ${esc(ltype(clash.typeId).name.toLowerCase())} already recorded (${fmtD(clash.from)} – ${fmtD(clash.to)}).</div>` : ''}
       <div class="field"><label class="lbl" for="lm-s">Status</label><select id="lm-s" class="input" data-bind="modal.status" data-rr>${LEAVE_ST.map((s) => opt(s, s === 'Pending' ? 'Waiting for approval' : s, m.status)).join('')}</select></div>
-      <div class="field"><label class="lbl" for="lm-r">Reason or note</label><input id="lm-r" class="input" maxlength="300" value="${esc(m.reason)}" data-bind="modal.reason" placeholder="Optional"></div>
+      <div class="field"><label class="lbl" for="lm-r">Reason</label><input id="lm-r" class="input" maxlength="300" value="${esc(m.reason)}" data-bind="modal.reason" placeholder="Optional"></div>
+      <div class="field"><label class="lbl" for="lm-n">Message to the employee</label><input id="lm-n" class="input" maxlength="300" value="${esc(m.hrNote || '')}" data-bind="modal.hrNote" placeholder="Optional, e.g. why it was rejected"><div class="hint">They see this on their My leave page.</div></div>
       ${m.err ? `<div class="err">${esc(m.err)}</div>` : ''}
     </div><div class="modal__foot">${m.id ? `<button type="button" class="btn btn--danger-ghost" data-act="hr-leave-del">Delete</button><span class="grow"></span>` : ''}<button type="button" class="btn btn--ghost" data-act="close-modal">Cancel</button><button class="btn btn--primary" type="submit" ${S.busy ? 'disabled' : ''}>Save</button></div></div></div></form>`;
   }
   async function saveLeave() {
     const m = S.modal, days = workingDays(m.from, m.to, m.half);
-    m.err = !m.empId ? 'Choose the employee.' : !m.from || !m.to ? 'Enter both dates.' : m.to < m.from ? 'The end date is before the start date.' : days <= 0 ? 'Those dates have no working days.' : '';
+    if (m.id && String(m.empId).startsWith('u:')) {
+      // No HR record yet: HR can still answer the request (status and message), not change it.
+      const at = now(); S.busy = true; render();
+      try { await S.db.collection('leave').doc(m.id).update({ status: m.status, hrNote: (m.hrNote || '').trim(), decidedAt: m.status === 'Pending' ? null : at, decidedBy: m.status === 'Pending' ? null : S.me.id, updatedAt: at, updatedBy: S.me.id });
+        S.busy = false; S.modal = null; toast('Answer saved for ' + empName(m.empId).replace(' (no HR record)', '') + '.'); render(); } catch (e) { S.busy = false; m.err = dbMsg(e); render(); }
+      return;
+    }
+    m.err = !m.empId ? 'Choose the employee.' : String(m.empId).startsWith('u:') ? 'This person has no HR record yet. Set one up on the Staff page first.' : !m.from || !m.to ? 'Enter both dates.' : m.to < m.from ? 'The end date is before the start date.' : days <= 0 ? 'Those dates have no working days.' : '';
     if (m.err) return render();
     const old = m.id ? H.leave[m.id] : null, at = now(), by = S.me.id;
-    const doc = { empId: m.empId, typeId: m.typeId, from: m.from, to: m.to, half: !!(m.half && m.from === m.to), days, status: m.status, reason: (m.reason || '').trim(), updatedAt: at, updatedBy: by };
+    const doc = { empId: m.empId, userId: (H.emps[m.empId] || {}).userId || (old && old.userId) || '', typeId: m.typeId, from: m.from, to: m.to, half: !!(m.half && m.from === m.to), days, status: m.status, reason: (m.reason || '').trim(), hrNote: (m.hrNote || '').trim(), updatedAt: at, updatedBy: by };
     if (!old || old.status !== m.status) { doc.decidedAt = m.status === 'Pending' ? null : at; doc.decidedBy = m.status === 'Pending' ? null : by; }
     S.busy = true; render();
     try {
@@ -1008,7 +1146,7 @@ window.ZenHRModule = function (A) {
     S.busy = true; render();
     try {
       const at = now(), by = S.me.id, batch = S.db.batch();
-      batch.set(S.db.doc('meta/org'), { departments: d.departments, updatedAt: at, updatedBy: by });
+      batch.set(S.db.doc('meta/org'), { departments: d.departments, leaveTypes: leave.map(({ id, name, paid }) => ({ id, name, paid })), workDays: d.workDays.slice().sort(), holidays: d.holidays, updatedAt: at, updatedBy: by }, { merge: true });
       batch.set(S.db.doc('hrSettings/main'), { hoursPerDay: num(d.hoursPerDay) || 8, otRate: num(d.otRate) || 1.5, deductLate: !!d.deductLate, workDays: d.workDays.slice().sort(), holidays: d.holidays, leaveTypes: leave, onboarding: lines(d.onboardingText), offboarding: lines(d.offboardingText), updatedAt: at, updatedBy: by });
       batch.set(S.db.doc('hrSettings/payroll'), { years, updatedAt: at, updatedBy: by });
       await batch.commit();
@@ -1033,7 +1171,7 @@ window.ZenHRModule = function (A) {
       return `<div class="modal" data-act="overlay"><div class="modal__box modal__box--wide" role="dialog" aria-modal="true">
         <div class="modal__head row"><h3 class="grow" style="font-size:1.2rem;overflow-wrap:anywhere">${esc(m.name)}</h3><button type="button" class="btn btn--ghost btn--sm" data-act="close-modal">Close</button></div>
         <div class="modal__body viewer">${m.err ? `<div class="err">${esc(m.err)}</div>` : m.url ? (pdf ? `<iframe src="${esc(m.url)}" title="${esc(m.name)}" style="width:100%;height:70vh;border:0"></iframe>` : `<img src="${esc(m.url)}" alt="${esc(m.name)}">`) : '<div class="muted">Loading…</div>'}</div>
-        <div class="modal__foot">${m.confirm ? `<span class="small t2 grow">Delete this document?</span><button class="btn btn--ghost btn--sm" data-act="hr-doc-keep">Keep</button><button class="btn btn--danger btn--sm" data-act="hr-doc-del">Delete</button>` : `<button class="btn btn--danger-ghost btn--sm" data-act="hr-doc-ask">Delete</button><span class="grow"></span>${m.url ? `<a class="btn btn--ghost btn--sm" href="${esc(m.url)}" target="_blank" rel="noopener">Open in new tab</a><a class="btn btn--primary btn--sm" href="${esc(m.url)}" download="${esc(m.name)}">Download</a>` : ''}`}</div></div></div>`;
+        <div class="modal__foot">${m.readOnly ? `<span class="grow"></span>${m.url ? `<a class="btn btn--ghost btn--sm" href="${esc(m.url)}" target="_blank" rel="noopener">Open in new tab</a><a class="btn btn--primary btn--sm" href="${esc(m.url)}" download="${esc(m.name)}">Download</a>` : ''}` : m.confirm ? `<span class="small t2 grow">Delete this document?</span><button class="btn btn--ghost btn--sm" data-act="hr-doc-keep">Keep</button><button class="btn btn--danger btn--sm" data-act="hr-doc-del">Delete</button>` : `<button class="btn btn--danger-ghost btn--sm" data-act="hr-doc-ask">Delete</button><span class="grow"></span>${m.url ? `<a class="btn btn--ghost btn--sm" href="${esc(m.url)}" target="_blank" rel="noopener">Open in new tab</a><a class="btn btn--primary btn--sm" href="${esc(m.url)}" download="${esc(m.name)}">Download</a>` : ''}`}</div></div></div>`;
     }
     return '';
   }
@@ -1048,6 +1186,11 @@ window.ZenHRModule = function (A) {
       go('staff-new');
     },
     async 'hr-at-unleave'(el) { try { await S.db.collection('leave').doc(el.dataset.id).delete(); toast('Leave removed for that day.'); } catch (e) { fail(e); } },
+    'my-leave-new'() { const t = today(); MY.form = { typeId: pub().leaveTypes[0] ? pub().leaveTypes[0].id : 'annual', from: t, to: t, half: false, reason: '', file: null, err: '' }; render(); const x = document.getElementById('ml-t'); if (x) x.focus(); },
+    'my-leave-close'() { MY.form = null; render(); },
+    'my-leave-unfile'() { MY.form.file = null; render(); },
+    'my-leave-cancel'(el) { confirm('Cancel this request?', 'HR will see it as cancelled.', 'Cancel request', async () => {
+      try { await S.db.collection('leave').doc(el.dataset.id).update({ status: 'Cancelled', updatedAt: now(), updatedBy: S.user.uid }); toast('Request cancelled.'); } catch (e) { fail(e); } }); },
     'hr-at-tab'(el) { H.at.tab = el.dataset.v; render(); },
     'hr-at-day'(el) { H.at.date = addDays(H.at.date, Number(el.dataset.v)); render(); },
     'hr-at-today'() { H.at.date = today(); render(); },
@@ -1086,9 +1229,10 @@ window.ZenHRModule = function (A) {
       csv(rows, `zenitude-staff-${today()}.csv`); toast('Exported ' + (rows.length - 1) + ' staff records.');
     },
     'hr-leave-new'(el) { S.modal = leaveModalFrom(null, el.dataset.emp || ''); render(); },
-    'hr-leave-edit'(el) { S.modal = leaveModalFrom(Object.assign({ id: el.dataset.id }, H.leave[el.dataset.id])); render(); },
-    async 'hr-leave-set'(el) { const l = H.leave[el.dataset.id], v = el.dataset.v; try { await S.db.collection('leave').doc(el.dataset.id).update({ status: v, decidedAt: now(), decidedBy: S.me.id, updatedAt: now(), updatedBy: S.me.id }); toast(`${empName(l.empId)}'s leave ${v.toLowerCase()}.`); } catch (e) { fail(e); } },
-    'hr-leave-del'() { const id = S.modal.id, l = H.leave[id]; confirm('Delete this leave record?', `${ltype(l.typeId).name} for ${empName(l.empId)}, ${fmtD(l.from)} – ${fmtD(l.to)}. To keep a record, set it to Cancelled instead.`, 'Delete', async () => { try { await S.db.collection('leave').doc(id).delete(); toast('Leave record deleted.'); } catch (e) { fail(e); } }, true); },
+    'hr-leave-edit'(el) { S.modal = leaveModalFrom(leaveById(el.dataset.id)); render(); },
+    'hr-leave-file'(el) { openFile('leave/' + el.dataset.id + '/files/main'); },
+    async 'hr-leave-set'(el) { const l = leaveById(el.dataset.id), v = el.dataset.v; try { await S.db.collection('leave').doc(el.dataset.id).update({ status: v, decidedAt: now(), decidedBy: S.me.id, updatedAt: now(), updatedBy: S.me.id }); toast(`${empName(l.empId)}'s leave ${v.toLowerCase()}.`); } catch (e) { fail(e); } },
+    'hr-leave-del'() { const id = S.modal.id, l = leaveById(id); confirm('Delete this leave record?', `${ltype(l.typeId).name} for ${empName(l.empId)}, ${fmtD(l.from)} – ${fmtD(l.to)}. To keep a record, set it to Cancelled instead.`, 'Delete', async () => { try { await S.db.collection('leave').doc(id).delete(); toast('Leave record deleted.'); } catch (e) { fail(e); } }, true); },
     'hr-lv-tab'(el) { H.lv.tab = el.dataset.v; render(); },
     'hr-cal'(el) { H.lv.month = addMonths(H.lv.month, Number(el.dataset.v)); render(); },
     'hr-bal-csv'() {
@@ -1185,7 +1329,14 @@ window.ZenHRModule = function (A) {
       } catch (x) { m.err = dbMsg(x); render(); }
     },
     'hr-set-save'() { if (!S.busy) saveSettings(); },
+    'my-leave-send'() { if (!MY.busy) sendMyLeave(); },
   };
+  document.addEventListener('change', async (e) => {
+    const el = e.target; if (!el || !el.dataset || !el.dataset.myfile || !MY.form) return;
+    const f = el.files && el.files[0]; el.value = ''; if (!f) return;
+    try { MY.form.file = await readUpload(f); MY.form.err = ''; } catch (x) { MY.form.err = (f.name || 'File') + ' ' + x.message + '.'; }
+    render();
+  });
   // Mark the employee form as edited so live updates don't overwrite it.
   document.addEventListener('input', (e) => { const b = e.target && e.target.dataset && e.target.dataset.bind; if (b && b.startsWith('hr.ed.') && H.ed) H.ed.touched = true; }, true);
   document.addEventListener('keydown', (e) => {
@@ -1194,5 +1345,5 @@ window.ZenHRModule = function (A) {
     if (e.target.id === 'hs-hn') { e.preventDefault(); actions['hr-hol-add'](); }
   });
 
-  return { isHR, sync, stop, owns, view, prepare, links, navOn, modal, actions, changes, forms, uploadDocs };
+  return { isHR, sync, stop, owns, view, prepare, links, selfLinks, navOn, modal, actions, changes, forms, uploadDocs };
 };
