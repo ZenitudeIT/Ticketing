@@ -65,7 +65,12 @@ window.ZenHRModule = function (A) {
   const empName = (id) => (H.emps[id] ? H.emps[id].fullName : 'Former employee');
   const empList = () => Object.entries(H.emps).map(([id, e]) => Object.assign({ id }, e)).sort((a, b) => (a.fullName || '').localeCompare(b.fullName || ''));
   const activeEmps = () => empList().filter((e) => e.status !== 'Left');
-  const main = () => Object.assign({}, DEFAULT_MAIN, H.main || {});
+  const main = () => Object.assign({}, DEFAULT_MAIN, H.main || {}, { departments: A.deptList() });
+  // A linked account's department (set on Team & roles or here) wins over the copy on the HR record.
+  const deptOf = (e) => (e && e.userId && S.users[e.userId] && S.users[e.userId].department) || (e && e.department) || '';
+  // Registered, active accounts that have no HR record yet.
+  const unlinkedUsers = () => { const linked = new Set(empList().map((e) => e.userId).filter(Boolean)); const mails = new Set(empList().map((e) => (e.email || '').toLowerCase()).filter(Boolean));
+    return Object.entries(S.users).filter(([id, u]) => u.active !== false && !linked.has(id) && !mails.has((u.email || '').toLowerCase())).map(([id, u]) => Object.assign({ id }, u)).sort((a, b) => (a.name || '').localeCompare(b.name || '')); };
   const leaveTypes = () => main().leaveTypes;
   const ltype = (id) => leaveTypes().find((t) => t.id === id) || { id, name: id, days: 0, paid: true };
   const ratesFor = (ty) => (H.pay && H.pay.years && H.pay.years[ty]) || P.DEFAULT_RATES[ty] || null;
@@ -145,7 +150,7 @@ window.ZenHRModule = function (A) {
     if (!r.startsWith('payrun-')) { H.run = null; H.runSrc = ''; H.slipId = null; }
     if (r !== 'hr-settings') H.set = null;
     if (!H.on) return;
-    if (r === 'staff-new') { if (!H.ed || H.ed.id) H.ed = edFrom(null); }
+    if (r === 'staff-new') { if (!H.ed || H.ed.id || H.prefill) { H.ed = Object.assign(edFrom(null), H.prefill || {}); H.prefill = null; } }
     else if (r.startsWith('staff-')) { const id = r.slice(6); if (!H.ed || H.ed.id !== id) H.ed = H.emps[id] ? edFrom(id) : null; watchDocs(H.emps[id] ? id : null); }
     if (r.startsWith('payrun-')) { const m = r.slice(7); if (!H.run || H.run.month !== m) { H.slipId = null; copyRun(m); } }
     if (r === 'hr-settings' && !H.set) H.set = setFrom();
@@ -191,6 +196,7 @@ window.ZenHRModule = function (A) {
     const item = (html) => `<div class="hr-item">${html}</div>`;
     return `<div class="head"><div class="grow"><div class="eyebrow">Human resources</div><h1>HR overview</h1><p>${fmtD(t)} · ${list.length} active staff</p></div>
       <a class="btn btn--ghost" href="#staff-new">${icon('plus')} Add employee</a><button class="btn btn--primary" data-act="hr-leave-new">${icon('plus')} Record leave</button></div>
+    ${unlinkedUsers().length ? `<div class="banner banner--info">${unlinkedUsers().length} registered ${unlinkedUsers().length === 1 ? 'person has' : 'people have'} no HR record yet. <a href="#staff">Set them up on the Staff page</a>.</div>` : ''}
     <div class="kpis">
       ${kpi('Active staff', list.length, Object.keys(H.emps).length - list.length + ' former', 'staff')}
       ${kpi('Away today', away.length, away.length ? esc(away.slice(0, 2).map((e) => e.fullName.split(' ')[0]).join(', ')) + (away.length > 2 ? '…' : '') : 'Everyone in', 'leave')}
@@ -225,25 +231,29 @@ window.ZenHRModule = function (A) {
   /* ---------- staff list ---------- */
   function staffList() {
     const q = H.q.trim().toLowerCase(), yr = today().slice(0, 4), annual = leaveTypes().find((t) => t.id === 'annual');
-    const list = empList().filter((e) => (H.show === 'all' || (H.show === 'left' ? e.status === 'Left' : e.status !== 'Left'))
-      && (!H.dept || e.department === H.dept)
+    const list = empList().filter((e) => (H.show === 'all' || (H.show === 'left' ? e.status === 'Left' : H.show !== 'new' && e.status !== 'Left'))
+      && (!H.dept || deptOf(e) === H.dept)
       && (!q || [e.fullName, e.empNo, e.email, e.jobTitle, e.nic].join(' ').toLowerCase().includes(q)));
-    const depts = [...new Set(main().departments.concat(empList().map((e) => e.department)).filter(Boolean))].sort();
-    return `<div class="head"><div class="grow"><div class="eyebrow">Human resources</div><h1>Staff</h1><p>${list.length} ${list.length === 1 ? 'person' : 'people'}</p></div>
+    const pend = H.show === 'left' ? [] : unlinkedUsers().filter((u) => (!H.dept || u.department === H.dept) && (!q || [u.name, u.email].join(' ').toLowerCase().includes(q)));
+    const depts = [...new Set(main().departments.concat(empList().map(deptOf)).filter(Boolean))].sort();
+    return `<div class="head"><div class="grow"><div class="eyebrow">Human resources</div><h1>Staff</h1><p>${list.length} ${list.length === 1 ? 'record' : 'records'}${pend.length ? ` · ${pend.length} registered without a record` : ''}</p></div>
       <button class="btn btn--ghost" data-act="hr-staff-csv" ${list.length ? '' : 'disabled'}>${icon('download')} Export</button>
       <a class="btn btn--primary" href="#staff-new">${icon('plus')} Add employee</a></div>
     <div class="panel"><div class="filters">
       <input id="hr-q" class="input search" placeholder="Search name, employee no., job, NIC…" value="${esc(H.q)}" data-bind="hr.q" data-rr aria-label="Search staff">
       <select id="hr-dept" class="input" data-bind="hr.dept" data-rr aria-label="Department">${opt('', 'All departments', H.dept)}${depts.map((d) => opt(d, d, H.dept)).join('')}</select>
-      <select id="hr-show" class="input" data-bind="hr.show" data-rr aria-label="Status">${opt('active', 'Current staff', H.show)}${opt('left', 'Former staff', H.show)}${opt('all', 'Everyone', H.show)}</select>
+      <select id="hr-show" class="input" data-bind="hr.show" data-rr aria-label="Status">${opt('active', 'Current staff', H.show)}${opt('new', 'Registered, no record yet', H.show)}${opt('left', 'Former staff', H.show)}${opt('all', 'Everyone', H.show)}</select>
     </div>
-    ${list.length ? `<div class="tbl-wrap"><table class="tbl"><thead><tr><th>Name</th><th>Department</th><th>Started</th><th>Contract</th><th>Status</th><th class="num">Basic</th>${annual ? '<th class="num">Annual leave left</th>' : ''}</tr></thead><tbody>
+    ${pend.length ? `<div class="panel__b" style="border-bottom:1px solid var(--line)"><div class="lbl">Registered on Zenitude Desk, no HR record yet</div>
+      ${pend.map((u) => `<div class="hr-item"><span class="avatar">${esc((u.name || '?').split(/\s+/).map((w) => w[0]).slice(0, 2).join('').toUpperCase())}</span><span class="grow"><b>${esc(u.name || u.email)}</b> <span class="muted small">· ${esc(u.email || '')}${u.department ? ' · ' + esc(u.department) : ''}</span></span>
+        <button class="btn btn--ghost btn--sm" data-act="hr-from-user" data-id="${esc(u.id)}">Set up record</button></div>`).join('')}</div>` : ''}
+    ${H.show === 'new' ? '' : list.length ? `<div class="tbl-wrap"><table class="tbl"><thead><tr><th>Name</th><th>Department</th><th>Started</th><th>Contract</th><th>Status</th><th class="num">Basic</th>${annual ? '<th class="num">Annual leave left</th>' : ''}</tr></thead><tbody>
       ${list.map((e) => { const left = annual ? entitlement(e, annual) - usedDays(e.id, 'annual', yr) : 0, away = onLeave(e.id, today());
         return `<tr class="click" data-act="hr-open" data-href="staff-${esc(e.id)}"><td><a class="ttl" href="#staff-${esc(e.id)}">${esc(e.fullName)}</a><div class="sub">${esc([e.empNo, e.jobTitle].filter(Boolean).join(' · ') || '—')}</div></td>
-        <td>${esc(e.department || '—')}</td><td class="nowrap">${fmtD(e.startDate)}</td><td>${esc(e.contractType || '—')}</td>
+        <td>${esc(deptOf(e) || '—')}</td><td class="nowrap">${fmtD(e.startDate)}</td><td>${esc(e.contractType || '—')}</td>
         <td>${e.status === 'Left' ? pillHR('Left') : away ? pillHR('On leave') : e.endDate ? pillHR('Leaving') : pillHR('Active')}</td>
         <td class="num nowrap">${e.basic ? money(e.basic) : '—'}</td>${annual ? `<td class="num">${e.status === 'Left' ? '—' : money2(left)}</td>` : ''}</tr>`; }).join('')}
-    </tbody></table></div>` : `<div class="empty">${Object.keys(H.emps).length ? 'Nobody matches these filters.' : 'No staff records yet. <a href="#staff-new">Add the first employee</a>.'}</div>`}</div>`;
+    </tbody></table></div>` : pend.length ? '' : `<div class="empty">${Object.keys(H.emps).length ? 'Nobody matches these filters.' : 'No staff records yet. <a href="#staff-new">Add the first employee</a>.'}</div>`}</div>`;
   }
 
   /* ---------- employee record ---------- */
@@ -254,7 +264,7 @@ window.ZenHRModule = function (A) {
       id, touched: false, err: '',
       fullName: e ? e.fullName || '' : '', empNo: e ? e.empNo || '' : nextEmpNo(), nic: e ? e.nic || '' : '', email: e ? e.email || '' : '', phone: e ? e.phone || '' : '',
       address: e ? e.address || '' : '', dob: e ? e.dob || '' : '', emergency: e ? e.emergency || '' : '',
-      department: e ? e.department || '' : '', jobTitle: e ? e.jobTitle || '' : '', manager: e ? e.manager || '' : '',
+      department: e ? deptOf(e) : '', jobTitle: e ? e.jobTitle || '' : '', manager: e ? e.manager || '' : '',
       startDate: e ? e.startDate || '' : '', contractType: e ? e.contractType || 'Permanent' : 'Permanent', probationEnd: e ? e.probationEnd || '' : '',
       endDate: e ? e.endDate || '' : '', status: e ? e.status || 'Active' : 'Active', userId: e ? e.userId || '' : '',
       bankName: e ? e.bankName || '' : '', bankAccount: e ? e.bankAccount || '' : '',
@@ -275,7 +285,8 @@ window.ZenHRModule = function (A) {
     if (!d) return back('staff', 'Staff') + `<div class="panel empty">This employee record doesn't exist.</div>`;
     const e = d.id ? H.emps[d.id] : null, b = (k) => 'hr.ed.' + k;
     const depts = [...new Set(main().departments.concat(d.department ? [d.department] : []))];
-    const users = Object.entries(S.users).filter(([, u]) => u.active !== false).map(([id]) => id).sort(byName);
+    const taken = new Set(empList().filter((x) => x.id !== d.id).map((x) => x.userId).filter(Boolean));
+    const users = Object.entries(S.users).filter(([id, u]) => (u.active !== false && !taken.has(id)) || id === d.userId).map(([id]) => id).sort(byName);
     const ty = P.taxYearOf(today().slice(0, 7));
     const form = `<form data-form="hr-emp-save" class="desk-form">
       <div class="panel"><div class="panel__h"><h2>Personal details</h2></div><div class="panel__b"><div class="g2">
@@ -295,7 +306,7 @@ window.ZenHRModule = function (A) {
         <div class="field"><label class="lbl" for="he-ct">Contract</label><select id="he-ct" class="input" data-bind="${b('contractType')}">${CONTRACTS.map((x) => opt(x, x, d.contractType)).join('')}</select></div>
         ${fieldI('he-start', 'Start date <span class="req">*</span>', b('startDate'), d.startDate, 'type="date"')}
         ${fieldI('he-prob', 'Probation ends', b('probationEnd'), d.probationEnd, 'type="date"')}
-        <div class="field"><label class="lbl" for="he-user">Zenitude Desk account</label><select id="he-user" class="input" data-bind="${b('userId')}">${opt('', 'Not linked', d.userId)}${users.map((u) => opt(u, name(u) + ' · ' + (S.users[u].email || ''), d.userId)).join('')}</select><div class="hint">Links their tickets to this record.</div></div>
+        <div class="field"><label class="lbl" for="he-user">Zenitude Desk account</label><select id="he-user" class="input" data-bind="${b('userId')}">${opt('', 'Not linked', d.userId)}${users.map((u) => opt(u, name(u) + ' · ' + (S.users[u].email || ''), d.userId)).join('')}</select><div class="hint">Their account. Department is shared with it (also set on Team &amp; roles).</div></div>
         ${e ? `<div class="field"><label class="lbl">Status</label><div style="padding-top:.45rem">${d.status === 'Left' ? pillHR('Left') + (d.endDate ? ' <span class="small muted">on ' + fmtD(d.endDate) + '</span>' : '') : d.endDate ? pillHR('Leaving') + ' <span class="small muted">last day ' + fmtD(d.endDate) + '</span>' : pillHR('Active')}</div></div>` : ''}
       </div></div></div>
       <div class="panel"><div class="panel__h"><h2>Pay and tax</h2><span class="small muted">used to prepare each month's payroll</span></div><div class="panel__b">
@@ -414,6 +425,10 @@ window.ZenHRModule = function (A) {
     try {
       if (old) await S.db.collection('employees').doc(d.id).update(doc);
       else { const ref = S.db.collection('employees').doc(); await ref.set(doc); d.id = ref.id; }
+      const u = doc.userId && S.users[doc.userId];
+      if (u && (u.department || '') !== doc.department) {
+        try { await S.db.collection('users').doc(doc.userId).update({ department: doc.department }); } catch (e) { console.error(e); toast('Saved, but the department on their account couldn\'t be updated: ' + dbMsg(e), 'error'); }
+      }
       S.busy = false; H.ed = null;
       toast(old ? fullName + '\'s record saved.' : fullName + ' added. Their joining checklist is ready.');
       go('staff-' + d.id);
@@ -576,7 +591,7 @@ window.ZenHRModule = function (A) {
     const first = month + '-01', last = monthEnd(month);
     const unpaid = leaveArr().filter((l) => l.empId === e.id && l.status === 'Approved' && !ltype(l.typeId).paid).reduce((t, l) => t + daysWithin(l, first, last), 0);
     return {
-      name: e.fullName, empNo: e.empNo || '', nic: e.nic || '', department: e.department || '', jobTitle: e.jobTitle || '', bankName: e.bankName || '', bankAccount: e.bankAccount || '',
+      name: e.fullName, empNo: e.empNo || '', nic: e.nic || '', department: deptOf(e), jobTitle: e.jobTitle || '', bankName: e.bankName || '', bankAccount: e.bankAccount || '',
       earnings: [{ label: 'Basic salary', amount: Number(e.basic) || 0, kind: 'basic', taxable: true }].concat((e.allowances || []).map((a) => ({ label: a.label, amount: Number(a.amount) || 0, kind: 'allowance', taxable: a.taxable !== false }))),
       deductions: [], dependents: e.dependents || 0, otherReliefs: e.otherReliefs || 0,
       csg: e.csg !== false, nsf: e.nsf !== false, prgf: e.prgf !== false, levy: e.levy !== false, unpaidDays: unpaid,
@@ -781,7 +796,7 @@ window.ZenHRModule = function (A) {
     const usedTypes = new Set(leaveArr().map((l) => l.typeId));
     return `<div class="head"><div class="grow"><div class="eyebrow">Human resources</div><h1>HR settings</h1><p>Only HR desk members can see or change these.</p></div></div>
     <form data-form="hr-set-save" class="desk-form">
-      <div class="panel"><div class="panel__h"><h2>Departments</h2></div><div class="panel__b">
+      <div class="panel"><div class="panel__h"><h2>Departments</h2><span class="small muted">also used on Team &amp; roles</span></div><div class="panel__b">
         <div class="chips">${d.departments.map((c, i) => `<span class="chip">${esc(c)}<button type="button" data-act="hr-dept-del" data-i="${i}" aria-label="Remove ${esc(c)}">×</button></span>`).join('')}</div>
         <div class="row" style="margin-top:.7rem;max-width:420px"><input id="hs-dept" class="input" maxlength="40" placeholder="Add a department" value="${esc(d.newDept)}" data-bind="hr.set.newDept"><button type="button" class="btn btn--ghost" data-act="hr-dept-add">Add</button></div>
       </div></div>
@@ -844,7 +859,8 @@ window.ZenHRModule = function (A) {
     S.busy = true; render();
     try {
       const at = now(), by = S.me.id, batch = S.db.batch();
-      batch.set(S.db.doc('hrSettings/main'), { departments: d.departments, workDays: d.workDays.slice().sort(), holidays: d.holidays, leaveTypes: leave, onboarding: lines(d.onboardingText), offboarding: lines(d.offboardingText), updatedAt: at, updatedBy: by });
+      batch.set(S.db.doc('meta/org'), { departments: d.departments, updatedAt: at, updatedBy: by });
+      batch.set(S.db.doc('hrSettings/main'), { workDays: d.workDays.slice().sort(), holidays: d.holidays, leaveTypes: leave, onboarding: lines(d.onboardingText), offboarding: lines(d.offboardingText), updatedAt: at, updatedBy: by });
       batch.set(S.db.doc('hrSettings/payroll'), { years, updatedAt: at, updatedBy: by });
       await batch.commit();
       S.busy = false; H.set = null; toast('HR settings saved.'); go('hr');
@@ -877,6 +893,11 @@ window.ZenHRModule = function (A) {
   /* ---------- events ---------- */
   const actions = {
     'hr-open'(el, e) { if (e.target.closest('a,button')) return; go(el.dataset.href); },
+    'hr-from-user'(el) {
+      const u = S.users[el.dataset.id]; if (!u) return;
+      H.prefill = { fullName: u.name || '', email: (u.email || '').toLowerCase(), userId: el.dataset.id, department: u.department || '' };
+      go('staff-new');
+    },
     'hr-al-add'() { H.ed.allowances.push({ label: '', amount: '', taxable: true }); H.ed.touched = true; render(); const i = document.getElementById('he-al-' + (H.ed.allowances.length - 1)); if (i) i.focus(); },
     'hr-al-del'(el) { H.ed.allowances.splice(+el.dataset.i, 1); H.ed.touched = true; render(); },
     'hr-offboard'(el) { S.modal = { type: 'hr-offboard', id: el.dataset.id, date: addDays(today(), 30), reason: 'Resignation', err: '' }; render(); },
@@ -892,7 +913,7 @@ window.ZenHRModule = function (A) {
     async 'hr-doc-del'() { const { empId, did } = S.modal; try { const r = S.db.collection('employees').doc(empId).collection('docs').doc(did), b = S.db.batch(); b.delete(r.collection('content').doc('full')); b.delete(r); await b.commit(); A.closeModal(); toast('Document deleted.'); } catch (e) { fail(e); } },
     'hr-staff-csv'() {
       const rows = [['Employee no.', 'Name', 'Job title', 'Department', 'Contract', 'Start date', 'Probation ends', 'Last day', 'Status', 'Email', 'Phone', 'NIC', 'Basic salary', 'Allowances']];
-      empList().forEach((e) => rows.push([e.empNo, e.fullName, e.jobTitle, e.department, e.contractType, e.startDate, e.probationEnd, e.endDate, e.status, e.email, e.phone, e.nic, e.basic, (e.allowances || []).map((a) => a.label + ' ' + a.amount).join('; ')]));
+      empList().forEach((e) => rows.push([e.empNo, e.fullName, e.jobTitle, deptOf(e), e.contractType, e.startDate, e.probationEnd, e.endDate, e.status, e.email, e.phone, e.nic, e.basic, (e.allowances || []).map((a) => a.label + ' ' + a.amount).join('; ')]));
       csv(rows, `zenitude-staff-${today()}.csv`); toast('Exported ' + (rows.length - 1) + ' staff records.');
     },
     'hr-leave-new'(el) { S.modal = leaveModalFrom(null, el.dataset.emp || ''); render(); },

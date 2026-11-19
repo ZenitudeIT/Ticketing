@@ -26,6 +26,7 @@
   const IT_CATEGORIES = ['Hardware', 'Software', 'Network & Wi-Fi', 'Accounts & Access', 'Email', 'Phones & Mobile', 'Website', 'Printer', 'Other'];
   const ROLES = { user: 'Team member', tech: 'Team member', admin: 'Administrator' };   // 'tech' = older accounts
   const ROLE_CHOICES = { user: 'Team member', admin: 'Administrator' };
+  const DEFAULT_DEPTS = ['Concierge', 'Operations', 'Front office', 'Sales & Marketing', 'Finance', 'HR', 'IT', 'Management'];
   const FIELD_TYPES = { text: 'Short text', textarea: 'Long text', number: 'Number', date: 'Date', select: 'Drop-down list', checkbox: 'Yes / no' };
   const FLOW = {
     'Open': ['In Progress', 'On Hold', 'Resolved'],
@@ -50,7 +51,7 @@
     user: null,               // Firebase auth user
     me: null,                 // users/{uid} document + id
     users: {}, tickets: {}, ticketsLoaded: false, usersLoaded: false,
-    desks: {}, desksLoaded: false, hrDeskId: '', tsub: {}, tq: {}, tqLoaded: {}, deskDraft: null, dashDesk: '', settingUp: false,
+    desks: {}, desksLoaded: false, hrDeskId: '', org: null, tsub: {}, tq: {}, tqLoaded: {}, deskDraft: null, dashDesk: '', settingUp: false,
     comments: [], cTid: null, cLoaded: false, cErr: false, extra: {}, probe: {},
     files: [], pending: {}, attBusy: null,
     unsub: {},
@@ -63,7 +64,7 @@
       login: { email: '', p: '', err: '', info: '' },
       reg: { name: '', email: '', p: '', p2: '', err: '' },
       profile: { name: '', err: '' },
-      nu: { name: '', email: '', role: 'user', p: '', err: '' },
+      nu: { name: '', email: '', role: 'user', department: '', p: '', err: '' },
     },
   };
 
@@ -88,6 +89,8 @@
   const byName = (a, b) => name(a).localeCompare(name(b));
   const agentsOf = (id) => ((S.desks[id] && S.desks[id].members) || []).filter((u) => S.users[u] && S.users[u].active !== false).sort(byName);
   const agentsOfMany = (ids) => [...new Set(ids.flatMap(agentsOf))].sort(byName);
+  // Departments: the company list (set in HR settings) plus any already in use.
+  const deptList = () => [...new Set(((S.org && S.org.departments) || DEFAULT_DEPTS).concat(Object.values(S.users).map((u) => u.department).filter(Boolean)))];
   const desksOfUser = (uid) => allDeskIds().filter((id) => memberOf(uid, id));
   const isOverdue = (t) => ACTIVE.includes(t.status) && t.dueAt && now() > t.dueAt;
   const resTime = (t) => (t.resolvedAt ? t.resolvedAt - t.createdAt : null);
@@ -192,7 +195,7 @@
   function stopAll() {
     Object.values(S.unsub).forEach((u) => { try { u(); } catch (e) { } });
     Object.values(S.tsub).forEach((u) => { try { u(); } catch (e) { } });
-    S.unsub = {}; S.tsub = {}; S.tq = {}; S.tqLoaded = {}; S.cTid = null; S.hrDeskId = '';
+    S.unsub = {}; S.tsub = {}; S.tq = {}; S.tqLoaded = {}; S.cTid = null; S.hrDeskId = ''; S.org = null;
     if (HR) HR.stop();
     S.users = {}; S.desks = {}; S.tickets = {}; S.comments = []; S.extra = {}; S.probe = {}; S.files = []; S.pending = {};
     S.ticketsLoaded = false; S.usersLoaded = false; S.desksLoaded = false; S.dataErr = ''; S.deskDraft = null; S.dashDesk = '';
@@ -227,7 +230,7 @@
   }
   function stopData() {
     if (HR) HR.stop();
-    ['u', 'd', 'c', 'f', 'h'].forEach((k) => { if (S.unsub[k]) { S.unsub[k](); delete S.unsub[k]; } });
+    ['u', 'd', 'c', 'f', 'h', 'o'].forEach((k) => { if (S.unsub[k]) { S.unsub[k](); delete S.unsub[k]; } });
     Object.values(S.tsub).forEach((u) => { try { u(); } catch (e) { } });
     S.tsub = {}; S.tq = {}; S.tqLoaded = {}; S.cTid = null; S.ticketsLoaded = false;
   }
@@ -247,6 +250,10 @@
       // Which desk runs the HR module (staff, leave, payroll). Set by an administrator on the Desks page.
       S.unsub.h = S.db.doc('meta/hr').onSnapshot((d) => { S.hrDeskId = (d.exists && d.data().deskId) || ''; if (HR) HR.sync(); prepareRoute(); render(); },
         (e) => { console.error('[Zenitude Desk] HR setting', e); });
+    }
+    if (!S.unsub.o) {
+      // Company-wide lists everyone can read (departments).
+      S.unsub.o = S.db.doc('meta/org').onSnapshot((d) => { S.org = d.exists ? d.data() : null; render(); }, (e) => { console.error('[Zenitude Desk] org settings', e); });
     }
     syncTickets();
   }
@@ -856,14 +863,16 @@
       <form class="panel__b" data-form="new-user"><div class="row wrap" style="gap:.8rem;align-items:flex-end">
         <div style="flex:1;min-width:160px"><label class="lbl" for="nu-name">Full name</label><input id="nu-name" class="input" value="${esc(d.name)}" data-bind="draft.nu.name" placeholder="Jade Moutou"></div>
         <div style="flex:1.2;min-width:190px"><label class="lbl" for="nu-email">Email</label><input id="nu-email" class="input" type="email" value="${esc(d.email)}" data-bind="draft.nu.email" placeholder="name@company.com" autocomplete="off"></div>
+        <div style="width:170px"><label class="lbl" for="nu-dept">Department</label><select id="nu-dept" class="input" data-bind="draft.nu.department">${opt('', 'Choose…', d.department || '')}${deptList().map((x) => opt(x, x, d.department || '')).join('')}</select></div>
         <div style="width:170px"><label class="lbl" for="nu-role">Role</label><select id="nu-role" class="input" data-bind="draft.nu.role">${Object.entries(ROLE_CHOICES).map(([k, v]) => opt(k, v, d.role)).join('')}</select></div>
         <div style="flex:1;min-width:160px"><label class="lbl" for="nu-p">Temporary password</label><input id="nu-p" class="input" type="password" value="${esc(d.p)}" data-bind="draft.nu.p" autocomplete="new-password" placeholder="6+ characters"></div>
         <button class="btn btn--primary" type="submit" ${S.busy ? 'disabled' : ''}>${S.busy ? 'Adding…' : 'Add person'}</button>
       </div>${d.err ? `<div class="err">${esc(d.err)}</div>` : ''}<div class="hint">They can sign in straight away and change the password from the top bar.</div></form></div>
-    <div class="panel"><div class="tbl-wrap"><table class="tbl"><thead><tr><th>Person</th><th>Role</th><th>Desks</th><th>Raised</th><th>Access</th><th></th></tr></thead><tbody>
+    <div class="panel"><div class="tbl-wrap"><table class="tbl"><thead><tr><th>Person</th><th>Department</th><th>Role</th><th>Desks</th><th>Raised</th><th>Access</th><th></th></tr></thead><tbody>
     ${ids.map((id) => { const u = S.users[id], self = id === S.me.id, off = u.active === false, locked = self || isAdminEmail(u.email);
       const ud = desksOfUser(id);
       return `<tr><td><div class="row"><div class="avatar ${ud.length ? 'avatar--gold' : ''}">${esc(initials(id))}</div><div><div class="ttl">${esc(u.name)}</div><div class="sub" style="overflow-wrap:anywhere">${esc(u.email || '')}</div>${self || isAdminEmail(u.email) ? `<div class="row" style="gap:.3rem;margin-top:.2rem">${self ? '<span class="tag">You</span>' : ''}${isAdminEmail(u.email) ? '<span class="tag tag--note">Main admin</span>' : ''}</div>` : ''}</div></div></td>
+        <td><select id="dp-${esc(id)}" class="input" style="height:32px;min-width:150px" data-chg="dept" data-id="${esc(id)}" aria-label="Department for ${esc(u.name)}">${opt('', '—', u.department || '')}${deptList().map((x) => opt(x, x, u.department || '')).join('')}</select></td>
         <td><select id="ro-${esc(id)}" class="input" style="height:32px;min-width:150px" data-chg="role" data-id="${esc(id)}" ${locked ? 'disabled' : ''} aria-label="Role for ${esc(u.name)}">${Object.entries(ROLE_CHOICES).map(([k, v]) => opt(k, v, u.role === 'admin' ? 'admin' : 'user')).join('')}</select></td>
         <td>${ud.length ? ud.map((x) => `<span class="desk-tag">${esc(deskName(x))}</span>`).join(' ') : '<span class="muted small">None</span>'}</td>
         <td>${all.filter((t) => t.requesterId === id).length}</td>
@@ -882,10 +891,12 @@
     const sec = S.fb.apps.find((a) => a.name === 'zen-desk-admin') || S.fb.initializeApp(CFG, 'zen-desk-admin');
     try {
       const cred = await sec.auth().createUserWithEmailAndPassword(email, d.p);
-      await S.db.collection('users').doc(cred.user.uid).set({ name: nm, email, role: d.role, active: true, createdAt: now() });
+      const doc = { name: nm, email, role: d.role, active: true, createdAt: now() };
+      if (d.department) doc.department = d.department;
+      await S.db.collection('users').doc(cred.user.uid).set(doc);
       await sec.auth().signOut();
       toast(nm + ' added (' + ROLE_CHOICES[d.role] + '). Add them to desks on the Desks page if they handle tickets.');
-      S.draft.nu = { name: '', email: '', role: 'user', p: '', err: '' };
+      S.draft.nu = { name: '', email: '', role: 'user', department: '', p: '', err: '' };
     } catch (e) { d.err = e && String(e.code || '').startsWith('auth/') ? authMsg(e) : dbMsg(e); console.error(e); }
     S.busy = false; render();
   }
@@ -1175,6 +1186,10 @@
         if (!isAgentOf(to) && t.requesterId !== S.me.id) go('tickets');
       } else render();
     },
+    async dept(el) {
+      const id = el.dataset.id, v = el.value;
+      try { await S.db.collection('users').doc(id).update({ department: v }); toast(name(id) + (v ? ' is now in ' + v + '.' : ' has no department.')); } catch (e) { fail(e); render(); }
+    },
     async role(el) {
       const id = el.dataset.id, role = el.value;
       try { await S.db.collection('users').doc(id).update({ role }); toast(name(id) + ' is now: ' + ROLE_CHOICES[role] + '.'); } catch (e) { fail(e); render(); }
@@ -1316,7 +1331,7 @@
 
   /* ---------- HR module (hr.js) ---------- */
   HR = window.ZenHRModule ? window.ZenHRModule({
-    S, esc, opt, icon, name, byName, rel, toast, fail, dbMsg, render, go, now, isAdmin, isAgentOf, deskName, slaFor, categoriesOf, emailOk,
+    S, esc, opt, icon, name, byName, rel, toast, fail, dbMsg, render, go, now, isAdmin, isAgentOf, deskName, slaFor, categoriesOf, emailOk, deptList,
     prepareImage, dataUrlToBlob, closeModal, HOUR,
   }) : null;
   if (HR) { Object.assign(actions, HR.actions); Object.assign(changes, HR.changes); Object.assign(forms, HR.forms); }

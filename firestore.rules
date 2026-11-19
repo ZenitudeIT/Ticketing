@@ -50,7 +50,7 @@ service cloud.firestore {
 
       // Administrators add people.
       allow create: if isAdmin()
-        && request.resource.data.keys().hasOnly(['name', 'email', 'role', 'active', 'createdAt'])
+        && request.resource.data.keys().hasOnly(['name', 'email', 'role', 'active', 'createdAt', 'department'])
         && str(request.resource.data.name, 2, 80)
         && str(request.resource.data.email, 5, 160)
         && request.resource.data.role in roles()
@@ -72,6 +72,11 @@ service cloud.firestore {
         && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['role', 'active', 'name'])
         && request.resource.data.role in roles()
         && request.resource.data.active is bool;
+
+      // Administrators and HR set anyone's department (including their own).
+      allow update: if (isAdmin() || isHR())
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['department'])
+        && request.resource.data.department is string && request.resource.data.department.size() <= 40;
 
       allow delete: if false;
     }
@@ -110,6 +115,15 @@ service cloud.firestore {
         && request.resource.data.keys().hasOnly(['deskId', 'updatedAt', 'updatedBy'])
         && request.resource.data.deskId is string
         && (request.resource.data.deskId == '' || deskExists(request.resource.data.deskId))
+        && request.resource.data.updatedBy == request.auth.uid;
+    }
+
+    // Company-wide lists (departments). Everyone signed in can read; administrators and HR edit.
+    match /meta/org {
+      allow read: if signedIn();
+      allow write: if (isAdmin() || isHR())
+        && request.resource.data.keys().hasOnly(['departments', 'updatedAt', 'updatedBy'])
+        && request.resource.data.departments is list && request.resource.data.departments.size() <= 60
         && request.resource.data.updatedBy == request.auth.uid;
     }
 
