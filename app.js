@@ -426,7 +426,7 @@
     if (id && !S.desks[id]) { S.deskDraft = null; return; }
     const d = id ? JSON.parse(JSON.stringify(S.desks[id])) : { name: '', description: '', email: '', active: true, categories: ['General', 'Other'], sla: Object.assign({}, SLA_HOURS), members: [S.me.id], fields: [] };
     S.deskDraft = {
-      id, name: d.name || '', description: d.description || '', email: d.email || '', active: d.active !== false,
+      id, name: d.name || '', description: d.description || '', email: d.email || '', emailIn: d.emailIn === true, active: d.active !== false,
       categories: (d.categories || []).slice(), newCat: '', sla: Object.assign({}, SLA_HOURS, d.sla || {}), members: (d.members || []).slice(), q: '',
       fields: (d.fields || []).map((f) => Object.assign({}, f, { optionsText: (f.options || []).join(', ') })), err: '',
       isHR: !!id && S.hrDeskId === id,
@@ -928,6 +928,7 @@
         <p class="small t2">${esc(d.description || 'No description')}</p>
         <div class="desk-box__facts">
           <div><span class="k">Email</span>${d.email ? esc(d.email) : '<span class="muted">Main IT mailbox</span>'}</div>
+          <div><span class="k">Emails → tickets</span>${d.emailIn === true ? 'On' : '<span class="muted">Off</span>'}</div>
           <div><span class="k">Members</span>${ms.length ? esc(ms.slice(0, 4).map(name).join(', ')) + (ms.length > 4 ? ` +${ms.length - 4}` : '') : '<span class="err" style="margin:0">Nobody yet</span>'}</div>
           <div><span class="k">Categories</span>${(d.categories || []).length}</div>
           <div><span class="k">Form fields</span>${(d.fields || []).length}</div>
@@ -950,8 +951,10 @@
         <div class="row wrap" style="gap:1rem;align-items:flex-start">
           <div class="field grow" style="min-width:220px"><label class="lbl" for="dd-name">Desk name</label><input id="dd-name" class="input" maxlength="40" placeholder="e.g. HR" value="${esc(d.name)}" data-bind="deskDraft.name"></div>
           <div class="field grow" style="min-width:260px"><label class="lbl" for="dd-email">Desk email address</label><input id="dd-email" class="input" type="email" maxlength="160" placeholder="e.g. hr@zenitudeconcierge.com" value="${esc(d.email)}" data-bind="deskDraft.email">
-            <div class="hint">New tickets for this desk are emailed here. Emails sent to this address become tickets on this desk, and replies to people come from it. Leave empty to use the main IT mailbox. You can change it any time.</div></div>
+            <div class="hint">New tickets for this desk are emailed here, and replies to people come from it. Leave empty to use the main IT mailbox. You can change it any time.</div></div>
         </div>
+        <div style="margin-bottom:.9rem"><label class="check"><input type="checkbox" id="dd-emailin" data-bind="deskDraft.emailIn" ${d.emailIn ? 'checked' : ''}> Turn new emails sent to this address into tickets</label>
+          <div class="hint">Off: emails to this address stay normal emails. No ticket is created and the sender gets no automatic reply. Replies to a ticket's notification (subject with [ZEN-…]) are still added to that ticket.</div></div>
         <div class="field"><label class="lbl" for="dd-desc">Description</label><input id="dd-desc" class="input" maxlength="160" placeholder="What people should come to this desk for" value="${esc(d.description)}" data-bind="deskDraft.description"><div class="hint">Shown when someone chooses a team for a new ticket.</div></div>
         <label class="check"><input type="checkbox" id="dd-active" data-bind="deskDraft.active" ${d.active ? 'checked' : ''}> Open: people can raise new tickets for this desk</label>
         <div style="margin-top:.7rem"><label class="check"><input type="checkbox" id="dd-hr" data-bind="deskDraft.isHR" ${d.isHR ? 'checked' : ''}> HR desk: its members also get Staff records, Leave and Payroll</label>
@@ -1018,9 +1021,10 @@
       if (added.length) log.push({ at, by, text: 'added ' + added.map(name).join(', ') + ' as member' + (added.length > 1 ? 's' : '') });
       if (removed.length) log.push({ at, by, text: 'removed ' + removed.map(name).join(', ') + ' from the desk' });
       if ((old.active !== false) !== d.active) log.push({ at, by, text: d.active ? 'opened the desk' : 'closed the desk to new tickets' });
+      if ((old.emailIn === true) !== !!d.emailIn) log.push({ at, by, text: d.emailIn ? 'turned on emails to tickets' : 'turned off emails to tickets' });
       if (JSON.stringify(old.fields || []) !== JSON.stringify(fields) || JSON.stringify(old.categories || []) !== JSON.stringify(cats) || JSON.stringify(old.sla || {}) !== JSON.stringify(sla)) log.push({ at, by, text: 'updated categories, targets or questions' });
     }
-    const doc = { name: nm, description: d.description.trim(), email, active: !!d.active, categories: cats, sla, members: d.members.slice(), fields,
+    const doc = { name: nm, description: d.description.trim(), email, emailIn: !!d.emailIn, active: !!d.active, categories: cats, sla, members: d.members.slice(), fields,
       order: old ? (old.order ?? 50) : Object.keys(S.desks).length + 1, log, updatedAt: at, updatedBy: by };
     S.busy = true; render();
     try {

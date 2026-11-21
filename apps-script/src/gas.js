@@ -390,10 +390,12 @@ function ticketEmails_(t, users, desks, from) {
 
 /* ---------- incoming ---------- */
 // Which desk takes new emails arriving at a mailbox.
+// The open desk that turns new emails at this mailbox into tickets ("Turn new emails sent to
+// this address into tickets" on the Desks page). Off by default: then new emails are left alone.
 function deskForMailbox_(desks, mailbox) {
-  const ids = Object.keys(desks).filter((id) => desks[id].active !== false && mailboxOf_(desks[id]) === mailbox);
+  const ids = Object.keys(desks).filter((id) => desks[id].active !== false && desks[id].emailIn === true && mailboxOf_(desks[id]) === mailbox);
   if (ids.indexOf('it') >= 0) return desks.it;
-  return ids.length ? desks[ids.sort()[0]] : (mailbox === MAILBOX.toLowerCase() ? deskOf_(desks, 'it') : null);
+  return ids.length ? desks[ids.sort()[0]] : null;
 }
 function checkMailboxes_(users, desks) {
   const boxes = [MAILBOX.toLowerCase()];
@@ -453,7 +455,7 @@ function handleMessage_(msg, users, desks, mailbox) {
     }
   }
   const desk = deskForMailbox_(desks, mailbox);
-  if (!desk) return 'ignored: no open desk uses this mailbox';
+  if (!desk) return 'left alone: emails to tickets is off for this address';
   if (!uid) {
     if (!domainAllowed(from, ALLOWED_DOMAINS)) return 'ignored: sender domain not allowed';
     uid = ensureAccount_(from, fromName, users);

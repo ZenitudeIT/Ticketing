@@ -215,6 +215,13 @@ sent.length = 0;
 const since = props['MAIL_SINCE|it@zenitudeconcierge.com'];
 const at = (s) => new Date(new Date(since).getTime() + s * 1000).toISOString();
 const msg = (id, sec, from, name, subject, body, extra) => Object.assign({ id, receivedDateTime: at(sec), from: { emailAddress: { address: from, name } }, subject, body: { content: body }, uniqueBody: { content: body }, importance: 'normal', internetMessageHeaders: [] }, extra || {});
+// Emails to tickets is off unless a desk switches it on: a new email is left alone.
+inbox = [msg('m0', 0.5, 'jade@zenitudeconcierge.com', 'Jade Moutou', 'Lunch on Friday?', 'Are you free for lunch on Friday?')];
+api.tick();
+assert.strictEqual(Object.keys(ticketsByNum()).length, 2, 'no ticket while emails to tickets is off');
+assert.strictEqual(sent.length, 0, 'no automatic reply while off'); assert.deepStrictEqual(marked, [], 'left unread');
+ok('emails to tickets off (default): a normal email stays a normal email, no ticket, no reply');
+put('desks/it', Object.assign(get('desks/it'), { emailIn: true }));
 inbox = [
   msg('old', -60, 'kevin@zenitudeconcierge.com', 'Kevin Li', 'Before setup', 'Sent before the watcher started, must be ignored.'),
   msg('m1', 1, 'jade@zenitudeconcierge.com', 'Jade Moutou', 'Wi-Fi not working at reception', 'Hi IT,\nThe Wi-Fi at reception has been down since 9am.\nThanks, Jade', { importance: 'high' }),
@@ -334,7 +341,7 @@ ok('IT desk created automatically; older tickets moved into it');
 
 put('users/u_amina', { name: 'Amina Joomun', email: 'amina@zenitudeconcierge.com', role: 'user', active: true });
 authUsers['amina@zenitudeconcierge.com'] = 'u_amina';
-put('desks/hr', { name: 'HR', description: 'People matters', email: 'hr@zenitudeconcierge.com', active: true, categories: ['Leave', 'Payroll', 'Other'],
+put('desks/hr', { name: 'HR', description: 'People matters', email: 'hr@zenitudeconcierge.com', emailIn: true, active: true, categories: ['Leave', 'Payroll', 'Other'],
   sla: { Low: 120, Medium: 48, High: 24, Critical: 8 }, members: ['u_amina'], fields: [], order: 2, log: [] });
 sent.length = 0;
 const n4 = Date.now();

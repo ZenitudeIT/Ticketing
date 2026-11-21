@@ -87,7 +87,7 @@ service cloud.firestore {
       allow read: if signedIn();
       // Only administrators create and change desks. Desks are closed, never deleted.
       allow create, update: if isAdmin()
-        && request.resource.data.keys().hasOnly(['name', 'description', 'email', 'active', 'categories', 'sla', 'members', 'fields', 'order', 'log', 'updatedAt', 'updatedBy'])
+        && request.resource.data.keys().hasOnly(['name', 'description', 'email', 'emailIn', 'active', 'categories', 'sla', 'members', 'fields', 'order', 'log', 'updatedAt', 'updatedBy'])
         && str(request.resource.data.name, 2, 40)
         && request.resource.data.description is string && request.resource.data.description.size() <= 200
         && request.resource.data.email is string && request.resource.data.email.size() <= 160
