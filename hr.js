@@ -143,6 +143,15 @@ window.ZenHRModule = function (A) {
     return t;
   }
   const registerTodo = (d) => (isWorkDay(d) ? activeEmps().filter((e) => employedOn(e, d) && !onLeave(e.id, d) && !markOf(e.id, d)).length : 0);
+  // Record one day of approved leave from the register (paid leave isn't deducted from pay).
+  async function registerLeave(id, d, typeId) {
+    const at = now(), t = ltype(typeId), e = H.emps[id];
+    try {
+      await S.db.collection('leave').add({ empId: id, userId: (e && e.userId) || '', typeId, from: d, to: d, half: false, days: 1, status: 'Approved', reason: 'Recorded from the attendance register', fromRegister: true, createdAt: at, createdBy: S.me.id, updatedAt: at, updatedBy: S.me.id, decidedAt: at, decidedBy: S.me.id });
+      if (markOf(id, d)) await saveMark(id, d, { s: '' });
+      toast(`${e ? e.fullName : 'Leave'}: ${t.name.toLowerCase()} on ${fmtD(d)}${t.paid ? ' (paid, no deduction)' : ' (unpaid, deducted from pay)'}.`);
+    } catch (x) { fail(x); render(); }
+  }
   async function saveMark(id, d, patch) {
     const cur = (H.att[d] && H.att[d].marks && H.att[d].marks[id]) || {};
     const m = Object.assign({ s: '', late: 0, ot: 0, note: '' }, cur, patch);
@@ -800,17 +809,33 @@ window.ZenHRModule = function (A) {
     const mo = H.at.month, first = mo + '-01', last = monthEnd(mo), days = [];
     for (let d = first; d <= last; d = addDays(d, 1)) days.push(d);
     const list = activeEmps().concat(empList().filter((e) => e.status === 'Left')).filter((e) => e.startDate && e.startDate <= last && !(e.endDate && e.endDate < first));
+    const pk = H.at.pick;
     const cell = (e, d) => {
       if (!employedOn(e, d)) return '<td class="off"></td>';
       const work = isWorkDay(d), l = work && onLeave(e.id, d), m = markOf(e.id, d), ot = m && Number(m.ot) ? `<sup>+${m.ot}h</sup>` : '';
       if (!work) return `<td class="off">${ot}</td>`;
-      if (l) return `<td title="${esc(ltype(l.typeId).name)}"><span class="ak ak--lv">LV</span></td>`;
-      if (!m) return `<td>${d <= today() ? '<span class="ak ak--no">·</span>' : ''}</td>`;
-      return `<td title="${esc(MARKS[m.s] + (m.s === 'L' && m.late ? ', ' + m.late + ' min' : '') + (m.note ? ' · ' + m.note : ''))}"><span class="ak ak--${m.s}">${m.s === 'P' ? '✓' : m.s === 'H' ? '½' : m.s}</span>${ot}</td>`;
+      const sel = pk && pk.id === e.id && pk.d === d ? ' sel' : '', click = `class="pick${sel}" data-act="hr-cell" data-id="${esc(e.id)}" data-d="${d}" tabindex="0" role="button"`;
+      if (l) return `<td ${click} title="${esc(ltype(l.typeId).name)} · click to change"><span class="ak ak--lv">LV</span></td>`;
+      if (!m) return `<td ${click} title="${esc(fmtD(d))} · click to mark" aria-label="Mark ${esc(e.fullName)} on ${esc(fmtD(d))}">${d <= today() ? '<span class="ak ak--no">·</span>' : ''}</td>`;
+      return `<td ${click} title="${esc(MARKS[m.s] + (m.s === 'L' && m.late ? ', ' + m.late + ' min' : '') + (m.note ? ' · ' + m.note : '') + ' · click to change')}"><span class="ak ak--${m.s}">${m.s === 'P' ? '✓' : m.s === 'H' ? '½' : m.s}</span>${ot}</td>`;
     };
+    // Small menu next to the clicked day.
+    let menu = '';
+    if (pk) {
+      const e = H.emps[pk.id], l = onLeave(pk.id, pk.d), m = markOf(pk.id, pk.d);
+      menu = `<div class="cellmenu" style="left:${Math.round(pk.x)}px;top:${Math.round(pk.y)}px" role="dialog" aria-label="Attendance for ${esc(e ? e.fullName : '')}">
+        <div class="cellmenu__h"><b>${esc(e ? e.fullName.split(' ')[0] : '')}</b> · ${esc(parseD(pk.d).toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short' }))}</div>
+        ${l ? `<div class="small" style="margin-bottom:.4rem">${esc(ltype(l.typeId).name)}${ltype(l.typeId).paid ? '' : ' (unpaid)'}</div>${l.fromRegister && l.from === pk.d && l.to === pk.d ? `<button class="btn btn--ghost btn--sm" data-act="hr-cell-unleave" data-id="${esc(l.id)}">Remove this leave</button>` : `<div class="small muted">Change it on the <a href="#leave">Leave</a> page.</div>`}`
+          : `<div class="mk">${Object.entries(MARKS).map(([k, v]) => `<button class="mk__b mk--${k} ${m && m.s === k ? 'on' : ''}" data-act="hr-cell-set" data-v="${k}">${v}</button>`).join('')}</div>
+        <div class="row" style="gap:.4rem;margin-top:.5rem"><select class="input mk__lv grow" data-chg="hr-cell-leave" aria-label="On leave"><option value="">On leave…</option>${leaveTypes().map((t) => `<option value="${esc(t.id)}">${esc(t.name)}${t.paid ? '' : ' (unpaid)'}</option>`).join('')}</select>
+          ${m ? '<button class="btn btn--ghost btn--sm" data-act="hr-cell-set" data-v="">Clear</button>' : ''}</div>`}
+      </div>`;
+    }
     return `<div class="panel"><div class="filters"><button class="btn btn--ghost btn--sm" data-act="hr-at-month" data-v="-1" aria-label="Previous month">‹</button><b style="min-width:150px;text-align:center">${fmtM(mo)}</b><button class="btn btn--ghost btn--sm" data-act="hr-at-month" data-v="1" aria-label="Next month">›</button>
       <span class="grow"></span><span class="small t2"><span class="ak ak--P">✓</span> present <span class="ak ak--L">L</span> late <span class="ak ak--H">½</span> half day <span class="ak ak--A">A</span> absent (unpaid) <span class="ak ak--lv">LV</span> leave <span class="ak ak--no">·</span> not marked</span>
       <button class="btn btn--ghost btn--sm" data-act="hr-at-csv">${icon('download')} Export</button></div>
+      ${menu}
+      <div class="panel__b small t2" style="padding:.6rem 1.25rem 0">Click any working day to mark it.</div>
       ${list.length ? `<div class="tbl-wrap"><table class="cal att-cal"><thead><tr><th class="cal__n">Employee</th>${days.map((d) => `<th class="${isWorkDay(d) ? '' : 'off'} ${d === today() ? 'now' : ''}" title="${esc(holidayName(d))}">${WEEK[parseD(d).getDay()][0]}<br>${Number(d.slice(8))}</th>`).join('')}</tr></thead><tbody>
         ${list.map((e) => `<tr><td class="cal__n"><a href="#staff-${esc(e.id)}">${esc(e.fullName)}</a></td>${days.map((d) => cell(e, d)).join('')}</tr>`).join('')}
       </tbody></table></div>
@@ -1191,10 +1216,17 @@ window.ZenHRModule = function (A) {
     'my-leave-unfile'() { MY.form.file = null; render(); },
     'my-leave-cancel'(el) { confirm('Cancel this request?', 'HR will see it as cancelled.', 'Cancel request', async () => {
       try { await S.db.collection('leave').doc(el.dataset.id).update({ status: 'Cancelled', updatedAt: now(), updatedBy: S.user.uid }); toast('Request cancelled.'); } catch (e) { fail(e); } }); },
-    'hr-at-tab'(el) { H.at.tab = el.dataset.v; render(); },
+    'hr-cell'(el) {
+      const r = el.getBoundingClientRect(), w = 300, x = Math.min(window.innerWidth - w - 8, Math.max(8, r.left + r.width / 2 - w / 2)), y = r.bottom + 6 + 150 > window.innerHeight ? Math.max(8, r.top - 156) : r.bottom + 6;
+      const same = H.at.pick && H.at.pick.id === el.dataset.id && H.at.pick.d === el.dataset.d;
+      H.at.pick = same ? null : { id: el.dataset.id, d: el.dataset.d, x, y }; render();
+    },
+    'hr-cell-set'(el) { const p = H.at.pick; if (!p) return; H.at.pick = null; saveMark(p.id, p.d, { s: el.dataset.v }); },
+    async 'hr-cell-unleave'(el) { H.at.pick = null; try { await S.db.collection('leave').doc(el.dataset.id).delete(); toast('Leave removed for that day.'); } catch (e) { fail(e); } },
+    'hr-at-tab'(el) { H.at.pick = null; H.at.tab = el.dataset.v; render(); },
     'hr-at-day'(el) { H.at.date = addDays(H.at.date, Number(el.dataset.v)); render(); },
     'hr-at-today'() { H.at.date = today(); render(); },
-    'hr-at-month'(el) { H.at.month = addMonths(H.at.month, Number(el.dataset.v)); render(); },
+    'hr-at-month'(el) { H.at.pick = null; H.at.month = addMonths(H.at.month, Number(el.dataset.v)); render(); },
     'hr-mark'(el) { const id = el.dataset.id, d = H.at.date, cur = markOf(id, d); saveMark(id, d, { s: cur && cur.s === el.dataset.v ? '' : el.dataset.v }); },
     async 'hr-at-all'() {
       const d = H.at.date, marks = {};
@@ -1297,15 +1329,8 @@ window.ZenHRModule = function (A) {
   function copyStrings(s) { s.earnings.forEach((x) => { x.amount = String(x.amount); }); s.dependents = String(s.dependents || 0); s.otherReliefs = String(s.otherReliefs || ''); }
   const changes = {
     // Register: record a day of leave (sick, local/annual…) instead of an absence. Paid leave isn't deducted.
-    async 'hr-at-leave'(el) {
-      const id = el.dataset.id, typeId = el.value, d = H.at.date; if (!typeId) return;
-      const at = now(), t = ltype(typeId), e = H.emps[id];
-      try {
-        await S.db.collection('leave').add({ empId: id, typeId, from: d, to: d, half: false, days: 1, status: 'Approved', reason: 'Recorded from the attendance register', fromRegister: true, createdAt: at, createdBy: S.me.id, updatedAt: at, updatedBy: S.me.id, decidedAt: at, decidedBy: S.me.id });
-        if (markOf(id, d)) await saveMark(id, d, { s: '' });
-        toast(`${e ? e.fullName : 'Leave'}: ${t.name.toLowerCase()} on ${fmtD(d)}${t.paid ? ' (paid, no deduction)' : ' (unpaid, deducted from pay)'}.`);
-      } catch (x) { fail(x); render(); }
-    },
+    'hr-at-leave'(el) { if (el.value) registerLeave(el.dataset.id, H.at.date, el.value); },
+    'hr-cell-leave'(el) { const p = H.at.pick; if (p && el.value) { H.at.pick = null; registerLeave(p.id, p.d, el.value); } },
     'hr-at-date'(el) { if (el.value) { H.at.date = el.value; render(); } },
     'hr-mark-f'(el) { const k = el.dataset.k, v = k === 'note' ? el.value.trim().slice(0, 120) : num(el.value); saveMark(el.dataset.id, H.at.date, { [k]: v }); },
     async 'hr-check'(el) {
@@ -1337,6 +1362,16 @@ window.ZenHRModule = function (A) {
     try { MY.form.file = await readUpload(f); MY.form.err = ''; } catch (x) { MY.form.err = (f.name || 'File') + ' ' + x.message + '.'; }
     render();
   });
+  document.addEventListener('click', (e) => {
+    if (!H.at.pick) return;
+    if (e.target.closest('.cellmenu') || e.target.closest('[data-act="hr-cell"]')) return;
+    H.at.pick = null; render();
+  }, true);
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && H.at.pick) { H.at.pick = null; render(); }
+    if ((e.key === 'Enter' || e.key === ' ') && e.target && e.target.dataset && e.target.dataset.act === 'hr-cell') { e.preventDefault(); e.target.click(); }
+  });
+  window.addEventListener('scroll', () => { if (H.at.pick) { H.at.pick = null; render(); } }, true);
   // Mark the employee form as edited so live updates don't overwrite it.
   document.addEventListener('input', (e) => { const b = e.target && e.target.dataset && e.target.dataset.bind; if (b && b.startsWith('hr.ed.') && H.ed) H.ed.touched = true; }, true);
   document.addEventListener('keydown', (e) => {
