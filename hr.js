@@ -106,12 +106,16 @@ window.ZenHRModule = function (A) {
     for (let d = from; d <= to; d = addDays(d, 1)) if (m.workDays.includes(parseD(d).getDay()) && !hol.has(d)) n++;
     return half && from === to ? Math.min(n, 0.5) : n;
   }
+  // A person's working week: their own (set on their staff record) or the company's.
+  const calFor = (id) => { const e = id && H.emps[id]; return e && e.workDays && e.workDays.length ? { workDays: e.workDays, holidays: main().holidays || [] } : main(); };
+  const weekText = (days) => { const o = [1, 2, 3, 4, 5, 6, 0].filter((w) => days.includes(w)), names = o.map((w) => WEEK[w]);
+    const run = o.every((w, i) => i === 0 || w === (o[i - 1] + 1) % 7); return o.length > 2 && run ? names[0] + '–' + names[names.length - 1] : names.join(', '); };
   // Part of a leave record that falls between two dates.
   function daysWithin(l, start, end) {
     const a = l.from > start ? l.from : start, b = l.to < end ? l.to : end;
     if (a > b) return 0;
     if (a === l.from && b === l.to) return Number(l.days) || 0;
-    return workingDays(a, b, false);
+    return workingDays(a, b, false, calFor(l.empId));
   }
   // Requests made by staff carry their account (userId); match them to their HR record.
   const leaveArr = () => Object.entries(H.leave).map(([id, l]) => Object.assign({ id }, l, { empId: l.empId || (l.userId ? empByUser(l.userId) || 'u:' + l.userId : '') }));
@@ -124,7 +128,7 @@ window.ZenHRModule = function (A) {
   const onLeave = (empId, date) => leaveArr().find((l) => l.empId === empId && l.status === 'Approved' && l.from <= date && l.to >= date);
 
   /* ---------- attendance helpers ---------- */
-  const isWorkDay = (d) => { const m = main(); return m.workDays.includes(parseD(d).getDay()) && !(m.holidays || []).some((h) => h.date === d); };
+  const isWorkDay = (d, id) => { const m = calFor(id); return m.workDays.includes(parseD(d).getDay()) && !(m.holidays || []).some((h) => h.date === d); };
   const holidayName = (d) => ((main().holidays || []).find((h) => h.date === d) || {}).name || '';
   const employedOn = (e, d) => !!e.startDate && e.startDate <= d && !(e.endDate && e.endDate < d) && !(e.status === 'Left' && !e.endDate);
   const markOf = (id, d) => { const m = H.att[d] && H.att[d].marks && H.att[d].marks[id]; return m && m.s ? m : null; };
@@ -134,7 +138,7 @@ window.ZenHRModule = function (A) {
     if (!e) return t;
     for (let d = from; d <= to; d = addDays(d, 1)) {
       const m = markOf(id, d); if (m) t.ot += Number(m.ot) || 0;
-      if (!isWorkDay(d) || !employedOn(e, d)) continue;
+      if (!isWorkDay(d, id) || !employedOn(e, d)) continue;
       t.days++;
       if (onLeave(id, d)) { t.leave++; continue; }
       if (!m) { if (d <= today()) t.unmarked++; continue; }
@@ -142,7 +146,7 @@ window.ZenHRModule = function (A) {
     }
     return t;
   }
-  const registerTodo = (d) => (isWorkDay(d) ? activeEmps().filter((e) => employedOn(e, d) && !onLeave(e.id, d) && !markOf(e.id, d)).length : 0);
+  const registerTodo = (d) => activeEmps().filter((e) => isWorkDay(d, e.id) && employedOn(e, d) && !onLeave(e.id, d) && !markOf(e.id, d)).length;
   // Record one day of approved leave from the register (paid leave isn't deducted from pay).
   async function registerLeave(id, d, typeId) {
     const at = now(), t = ltype(typeId), e = H.emps[id];
@@ -182,7 +186,7 @@ window.ZenHRModule = function (A) {
     H.unsub.e = db.collection('employees').onSnapshot((s) => { const o = {}; s.docs.forEach((d) => { o[d.id] = d.data(); }); H.emps = o; H.loaded.e = true; refreshDrafts(); schedulePublish(); render(); }, onErr('e'));
     H.unsub.l = db.collection('leave').onSnapshot((s) => { const o = {}; s.docs.forEach((d) => { o[d.id] = d.data(); }); H.leave = o; H.loaded.l = true; schedulePublish(); render(); }, onErr('l'));
     H.unsub.s = db.collection('hrSettings').onSnapshot((s) => { H.main = null; H.pay = null; s.docs.forEach((d) => { if (d.id === 'main') H.main = d.data(); if (d.id === 'payroll') H.pay = d.data(); }); H.loaded.s = true; schedulePublish(); render(); }, onErr('s'));
-    H.unsub.b = db.collection('leaveBalances').onSnapshot((s) => { const o = {}; s.docs.forEach((d) => { o[d.id] = balKey(d.data().types, d.data().year); }); H.balSeen = o; H.loaded.b = true; schedulePublish(); }, onErr('b'));
+    H.unsub.b = db.collection('leaveBalances').onSnapshot((s) => { const o = {}; s.docs.forEach((d) => { o[d.id] = balKey(d.data().types, d.data().year) + '|' + (d.data().workDays || []).slice().sort().join(','); }); H.balSeen = o; H.loaded.b = true; schedulePublish(); }, onErr('b'));
     H.unsub.a = db.collection('attendance').where('date', '>=', addDays(today(), -430)).onSnapshot((s) => { const o = {}; s.docs.forEach((d) => { o[d.id] = d.data(); }); H.att = o; H.loaded.a = true; render(); }, onErr('a'));
     H.unsub.r = db.collection('payruns').onSnapshot((s) => { const o = {}; s.docs.forEach((d) => { o[d.id] = d.data(); }); H.runs = o; H.loaded.r = true; refreshDrafts(); render(); }, onErr('r'));
   }
@@ -214,7 +218,8 @@ window.ZenHRModule = function (A) {
       const types = leaveTypes().map((t) => { const ent = entitlement(e, t), used = usedDays(e.id, t.id, yr);
         const pend = leaveArr().filter((l) => l.empId === e.id && l.typeId === t.id && l.status === 'Pending').reduce((n, l) => n + daysWithin(l, yr + '-01-01', yr + '-12-31'), 0);
         return { id: t.id, name: t.name, paid: !!t.paid, ent, used, pending: pend }; });
-      if ((H.balSeen || {})[e.userId] !== balKey(types, yr)) writes.push([S.db.collection('leaveBalances').doc(e.userId), { year: yr, types, updatedAt: now() }]);
+      const wk = (e.workDays && e.workDays.length ? e.workDays : m.workDays).slice().sort();
+      if ((H.balSeen || {})[e.userId] !== balKey(types, yr) + '|' + wk.join(',')) writes.push([S.db.collection('leaveBalances').doc(e.userId), { year: yr, types, workDays: wk, updatedAt: now() }]);
     });
     Object.entries(H.leave).forEach(([id, l]) => { const e = l.empId && H.emps[l.empId]; if (e && e.userId && !l.userId) writes.push([S.db.collection('leave').doc(id), { userId: e.userId }, true]); });
     for (let i = 0; i < writes.length; i += 400) {
@@ -352,7 +357,7 @@ window.ZenHRModule = function (A) {
         <button class="btn btn--ghost btn--sm" data-act="hr-from-user" data-id="${esc(u.id)}">Set up record</button></div>`).join('')}</div>` : ''}
     ${H.show === 'new' ? '' : list.length ? `<div class="tbl-wrap"><table class="tbl"><thead><tr><th>Name</th><th>Department</th><th>Started</th><th>Contract</th><th>Status</th><th class="num">Basic</th>${annual ? '<th class="num">Annual leave left</th>' : ''}</tr></thead><tbody>
       ${list.map((e) => { const left = annual ? entitlement(e, annual) - usedDays(e.id, 'annual', yr) : 0, away = onLeave(e.id, today());
-        return `<tr class="click" data-act="hr-open" data-href="staff-${esc(e.id)}"><td><a class="ttl" href="#staff-${esc(e.id)}">${esc(e.fullName)}</a><div class="sub">${esc([e.empNo, e.jobTitle].filter(Boolean).join(' · ') || '—')}</div></td>
+        return `<tr class="click" data-act="hr-open" data-href="staff-${esc(e.id)}"><td><a class="ttl" href="#staff-${esc(e.id)}">${esc(e.fullName)}</a><div class="sub">${esc([e.empNo, e.jobTitle, e.workDays && e.workDays.length ? 'works ' + weekText(e.workDays) : ''].filter(Boolean).join(' · ') || '—')}</div></td>
         <td>${esc(deptOf(e) || '—')}</td><td class="nowrap">${fmtD(e.startDate)}</td><td>${esc(e.contractType || '—')}</td>
         <td>${e.status === 'Left' ? pillHR('Left') : away ? pillHR('On leave') : e.endDate ? pillHR('Leaving') : pillHR('Active')}</td>
         <td class="num nowrap">${e.basic ? money(e.basic) : '—'}</td>${annual ? `<td class="num">${e.status === 'Left' ? '—' : money2(left)}</td>` : ''}</tr>`; }).join('')}
@@ -376,6 +381,7 @@ window.ZenHRModule = function (A) {
       csg: e ? e.csg !== false : true, nsf: e ? e.nsf !== false : true, prgf: e ? e.prgf !== false : true, levy: e ? e.levy !== false : true,
       openTY: e && e.opening ? e.opening.taxYear : '', openEmol: e && e.opening ? String(e.opening.emol) : '', openPaye: e && e.opening ? String(e.opening.paye) : '',
       leaveDays: ld, notes: e ? e.notes || '' : '',
+      ownWeek: !!(e && e.workDays && e.workDays.length), workDays: (e && e.workDays && e.workDays.length ? e.workDays : main().workDays).slice(),
     };
   }
   function nextEmpNo() {
@@ -409,6 +415,10 @@ window.ZenHRModule = function (A) {
         <div class="field"><label class="lbl" for="he-ct">Contract</label><select id="he-ct" class="input" data-bind="${b('contractType')}">${CONTRACTS.map((x) => opt(x, x, d.contractType)).join('')}</select></div>
         ${fieldI('he-start', 'Start date <span class="req">*</span>', b('startDate'), d.startDate, 'type="date"')}
         ${fieldI('he-prob', 'Probation ends', b('probationEnd'), d.probationEnd, 'type="date"')}
+        <div class="field" style="grid-column:1/-1"><span class="lbl">Working days</span>
+          <label class="check"><input type="checkbox" id="he-ownweek" data-chg="hr-ed-ownweek" ${d.ownWeek ? '' : 'checked'}> Same as the company (${esc(weekText(main().workDays))})</label>
+          ${d.ownWeek ? `<div class="row wrap" style="gap:1rem;margin-top:.5rem">${[1, 2, 3, 4, 5, 6, 0].map((w) => `<label class="check"><input type="checkbox" id="he-wd${w}" data-chg="hr-ed-wd" data-v="${w}" ${d.workDays.includes(w) ? 'checked' : ''}> ${WEEK[w]}</label>`).join('')}</div>
+            <div class="hint">Attendance, leave days and pay follow this person's own week (${esc(weekText(d.workDays))}).</div>` : ''}</div>
         <div class="field"><label class="lbl" for="he-user">Zenitude Desk account</label><select id="he-user" class="input" data-bind="${b('userId')}">${opt('', 'Not linked', d.userId)}${users.map((u) => opt(u, name(u) + ' · ' + (S.users[u].email || ''), d.userId)).join('')}</select><div class="hint">Their account. Department is shared with it (also set on Team &amp; roles).</div></div>
         ${e ? `<div class="field"><label class="lbl">Status</label><div style="padding-top:.45rem">${d.status === 'Left' ? pillHR('Left') + (d.endDate ? ' <span class="small muted">on ' + fmtD(d.endDate) + '</span>' : '') : d.endDate ? pillHR('Leaving') + ' <span class="small muted">last day ' + fmtD(d.endDate) + '</span>' : pillHR('Active')}</div></div>` : ''}
       </div></div></div>
@@ -500,7 +510,8 @@ window.ZenHRModule = function (A) {
       : num(d.basic) < 0 ? 'Basic salary can\'t be negative.'
       : allowances.some((a) => !a.label) ? 'Every allowance needs a name.'
       : d.endDate && d.endDate < d.startDate ? 'The last day is before the start date.'
-      : d.openTY && (num(d.openEmol) < 0 || num(d.openPaye) < 0) ? 'Previous employer amounts can\'t be negative.' : '';
+      : d.openTY && (num(d.openEmol) < 0 || num(d.openPaye) < 0) ? 'Previous employer amounts can\'t be negative.'
+      : d.ownWeek && !d.workDays.length ? 'Tick at least one working day.' : '';
     if (d.err) return render();
     const at = now(), by = S.me.id, log = old ? (old.log || []).slice(-80) : [{ at, by, text: 'added the record' }];
     const doc = {
@@ -512,11 +523,13 @@ window.ZenHRModule = function (A) {
       csg: !!d.csg, nsf: !!d.nsf, prgf: !!d.prgf, levy: !!d.levy,
       opening: d.openTY ? { taxYear: d.openTY, emol: num(d.openEmol), paye: num(d.openPaye) } : null,
       leaveDays, notes: d.notes.trim(), updatedAt: at, updatedBy: by,
+      workDays: d.ownWeek ? d.workDays.slice().sort() : [],
     };
     if (old) {
       if (Number(old.basic || 0) !== doc.basic) log.push({ at, by, text: `changed basic salary from ${money(old.basic)} to ${money(doc.basic)}` });
       if ((old.jobTitle || '') !== doc.jobTitle || (old.department || '') !== doc.department) log.push({ at, by, text: `changed job to ${[doc.jobTitle, doc.department].filter(Boolean).join(', ') || '—'}` });
       if ((old.contractType || '') !== doc.contractType) log.push({ at, by, text: `changed contract to ${doc.contractType}` });
+      if ((old.workDays || []).join() !== doc.workDays.join()) log.push({ at, by, text: `set working days to ${doc.workDays.length ? weekText(doc.workDays) : 'the company week'}` });
       if (JSON.stringify(old.allowances || []) !== JSON.stringify(allowances)) log.push({ at, by, text: 'updated allowances' });
       if (log.length === (old.log || []).slice(-80).length) log.push({ at, by, text: 'updated the record' });
     } else {
@@ -614,7 +627,7 @@ window.ZenHRModule = function (A) {
 
   /* ---------- My leave (staff self-service) ---------- */
   function myLeaveView() {
-    const P0 = pub(), b = MY.bal, yr = today().slice(0, 4), f = MY.form;
+    const b = MY.bal, P0 = Object.assign(pub(), b && b.workDays && b.workDays.length ? { workDays: b.workDays } : {}), yr = today().slice(0, 4), f = MY.form;
     const mine = Object.entries(MY.leave).map(([id, l]) => Object.assign({ id }, l)).sort((a, c) => c.from.localeCompare(a.from));
     const tname = (id) => (P0.leaveTypes.find((t) => t.id === id) || { name: id }).name;
     const cards = b && b.year === yr ? b.types.filter((t) => t.ent > 0 || t.used > 0 || t.pending > 0).map((t) => `<div class="panel kpi"><div class="kpi__k">${esc(t.name)}</div>
@@ -657,7 +670,7 @@ window.ZenHRModule = function (A) {
       </tbody></table></div>` : '<div class="empty">No leave yet.</div>'}</div>`;
   }
   async function sendMyLeave() {
-    const f = MY.form, P0 = pub(), days = workingDays(f.from, f.to, f.half, P0);
+    const f = MY.form, P0 = Object.assign(pub(), MY.bal && MY.bal.workDays && MY.bal.workDays.length ? { workDays: MY.bal.workDays } : {}), days = workingDays(f.from, f.to, f.half, P0);
     f.err = !f.from || !f.to ? 'Choose the dates.' : f.to < f.from ? 'The end date is before the start date.' : days <= 0 ? 'Those dates are weekends or public holidays.' : '';
     if (f.err) return render();
     MY.busy = true; render();
@@ -728,7 +741,7 @@ window.ZenHRModule = function (A) {
       </tbody></table></div>` : '<div class="empty">No current staff.</div>'}</div>`;
   }
   function leaveModal(m) {
-    const emps = activeEmps(), days = workingDays(m.from, m.to, m.half), t = ltype(m.typeId), e = emp(m.empId);
+    const emps = activeEmps(), days = workingDays(m.from, m.to, m.half, calFor(m.empId)), t = ltype(m.typeId), e = emp(m.empId);
     const yr = (m.from || today()).slice(0, 4), ent = e ? entitlement(e, t) : 0;
     const used = e ? usedDays(m.empId, m.typeId, yr) - (m.id && H.leave[m.id] && H.leave[m.id].status === 'Approved' && H.leave[m.id].typeId === m.typeId ? daysWithin(H.leave[m.id], yr + '-01-01', yr + '-12-31') : 0) : 0;
     const clash = m.empId && leaveArr().find((l) => l.id !== m.id && l.empId === m.empId && ['Approved', 'Pending'].includes(l.status) && l.from <= m.to && l.to >= m.from);
@@ -749,7 +762,7 @@ window.ZenHRModule = function (A) {
     </div><div class="modal__foot">${m.id ? `<button type="button" class="btn btn--danger-ghost" data-act="hr-leave-del">Delete</button><span class="grow"></span>` : ''}<button type="button" class="btn btn--ghost" data-act="close-modal">Cancel</button><button class="btn btn--primary" type="submit" ${S.busy ? 'disabled' : ''}>Save</button></div></div></div></form>`;
   }
   async function saveLeave() {
-    const m = S.modal, days = workingDays(m.from, m.to, m.half);
+    const m = S.modal, days = workingDays(m.from, m.to, m.half, calFor(m.empId));
     if (m.id && String(m.empId).startsWith('u:')) {
       // No HR record yet: HR can still answer the request (status and message), not change it.
       const at = now(); S.busy = true; render();
@@ -778,9 +791,10 @@ window.ZenHRModule = function (A) {
     return head + tabs + (T.tab === 'month' ? attMonth() : attDay());
   }
   function attDay() {
-    const d = H.at.date, q = H.at.q.trim().toLowerCase(), work = isWorkDay(d), hol = holidayName(d);
+    const d = H.at.date, q = H.at.q.trim().toLowerCase(), hol = holidayName(d);
     const list = activeEmps().concat(empList().filter((e) => e.status === 'Left')).filter((e) => employedOn(e, d) && (!q || (e.fullName + ' ' + deptOf(e)).toLowerCase().includes(q)));
-    const todo = list.filter((e) => !onLeave(e.id, d) && !markOf(e.id, d)).length;
+    const work = list.some((e) => isWorkDay(d, e.id)), companyDay = isWorkDay(d);
+    const todo = list.filter((e) => isWorkDay(d, e.id) && !onLeave(e.id, d) && !markOf(e.id, d)).length;
     const cnt = { P: 0, L: 0, H: 0, A: 0 }; list.forEach((e) => { const m = markOf(e.id, d); if (m) cnt[m.s]++; });
     return `<div class="panel"><div class="filters">
       <button class="btn btn--ghost btn--sm" data-act="hr-at-day" data-v="-1" aria-label="Previous day">‹</button>
@@ -792,12 +806,13 @@ window.ZenHRModule = function (A) {
       <input id="at-q" class="input search" style="max-width:220px" placeholder="Search…" value="${esc(H.at.q)}" data-bind="hr.at.q" data-rr aria-label="Search">
       ${work && todo ? `<button class="btn btn--primary btn--sm" data-act="hr-at-all">Mark the other ${todo} present</button>` : ''}
     </div>
-    ${!work ? `<div class="banner banner--info" style="margin:1rem">${hol ? esc(hol) + ' (public holiday)' : 'Not a working day'}. You can still record overtime.</div>` : ''}
+    ${!work ? `<div class="banner banner--info" style="margin:1rem">${hol ? esc(hol) + ' (public holiday)' : 'Nobody works this day'}. You can still record overtime.</div>`
+      : !companyDay ? `<div class="banner banner--info" style="margin:1rem">${hol ? esc(hol) + ' (public holiday). ' : 'Not a normal working day. '}Only people whose working week includes ${esc(WEEK[parseD(d).getDay()])} can be marked.</div>` : ''}
     ${work ? `<div class="panel__b small t2" style="padding-bottom:0">${cnt.P} present · ${cnt.L} late · ${cnt.H} half day · ${cnt.A} absent${todo ? ` · <b>${todo} not marked</b>` : ''}</div>` : ''}
     ${list.length ? `<div class="tbl-wrap"><table class="tbl att"><thead><tr><th>Employee</th><th>Status</th><th>Late (min)</th><th>Overtime (h)</th><th>Note</th></tr></thead><tbody>
       ${list.map((e) => { const l = onLeave(e.id, d), m = markOf(e.id, d) || { s: '', late: '', ot: '', note: '' }, raw = (H.att[d] && H.att[d].marks && H.att[d].marks[e.id]) || {};
         return `<tr><td><a class="ttl" href="#staff-${esc(e.id)}">${esc(e.fullName)}</a><div class="sub">${esc(deptOf(e) || '')}</div></td>
-          <td>${l ? `<span class="pill hr-onleave"><i></i>${esc(ltype(l.typeId).name)}${ltype(l.typeId).paid ? '' : ' (unpaid)'}</span>${l.fromRegister && l.from === d && l.to === d ? ` <button class="btn btn--link small" data-act="hr-at-unleave" data-id="${esc(l.id)}">Undo</button>` : ''}`
+          <td>${!isWorkDay(d, e.id) ? '<span class="muted small">Day off</span>' : l ? `<span class="pill hr-onleave"><i></i>${esc(ltype(l.typeId).name)}${ltype(l.typeId).paid ? '' : ' (unpaid)'}</span>${l.fromRegister && l.from === d && l.to === d ? ` <button class="btn btn--link small" data-act="hr-at-unleave" data-id="${esc(l.id)}">Undo</button>` : ''}`
             : work ? `<div class="row wrap" style="gap:.4rem"><div class="mk">${Object.entries(MARKS).map(([k, v]) => `<button class="mk__b mk--${k} ${m.s === k ? 'on' : ''}" data-act="hr-mark" data-id="${esc(e.id)}" data-v="${k}" aria-pressed="${m.s === k}" title="${k === 'A' ? 'Absent without leave: a day\'s pay is deducted' : ''}">${v}</button>`).join('')}</div>
               <select class="input mk__lv" data-chg="hr-at-leave" data-id="${esc(e.id)}" aria-label="Record leave for ${esc(e.fullName)}"><option value="">On leave…</option>${leaveTypes().map((t) => `<option value="${esc(t.id)}">${esc(t.name)}${t.paid ? '' : ' (unpaid)'}</option>`).join('')}</select></div>` : '<span class="muted small">Day off</span>'}</td>
           <td>${m.s === 'L' ? `<input class="input num" style="width:80px;height:32px" inputmode="numeric" value="${esc(m.late || '')}" data-chg="hr-mark-f" data-id="${esc(e.id)}" data-k="late" aria-label="Minutes late">` : ''}</td>
@@ -812,7 +827,7 @@ window.ZenHRModule = function (A) {
     const pk = H.at.pick;
     const cell = (e, d) => {
       if (!employedOn(e, d)) return '<td class="off"></td>';
-      const work = isWorkDay(d), l = work && onLeave(e.id, d), m = markOf(e.id, d), ot = m && Number(m.ot) ? `<sup>+${m.ot}h</sup>` : '';
+      const work = isWorkDay(d, e.id), l = work && onLeave(e.id, d), m = markOf(e.id, d), ot = m && Number(m.ot) ? `<sup>+${m.ot}h</sup>` : '';
       if (!work) return `<td class="off">${ot}</td>`;
       const sel = pk && pk.id === e.id && pk.d === d ? ' sel' : '', click = `class="pick${sel}" data-act="hr-cell" data-id="${esc(e.id)}" data-d="${d}" tabindex="0" role="button"`;
       if (l) return `<td ${click} title="${esc(ltype(l.typeId).name)} · click to change"><span class="ak ak--lv">LV</span></td>`;
@@ -878,14 +893,14 @@ window.ZenHRModule = function (A) {
     const out = { earn: [], ded: [], t: null };
     if (!s || s.noAuto) return out;
     const e = H.emps[id], first = month + '-01', last = monthEnd(month), mm = main();
-    const wd = Math.max(1, workingDays(first, last));
+    const wd = Math.max(1, workingDays(first, last, false, calFor(id)));
     const basic = (s.earnings || []).filter((x) => x.kind === 'basic' && !x.auto).reduce((t, x) => t + num(x.amount), 0);
     const daily = basic / wd, hourly = daily / (Number(mm.hoursPerDay) || 8);
     const d2 = (n) => money2(n) + ' day' + (n === 1 ? '' : 's');
     // Unpaid time is taken off basic pay (so tax and contributions follow what is actually paid).
     const cut = (x) => out.earn.push({ label: x.label, amount: -x.amount, kind: 'basic', taxable: true });
     if (e) {
-      let emp = 0; for (let d = first; d <= last; d = addDays(d, 1)) if (isWorkDay(d) && employedOn(e, d)) emp++;
+      let emp = 0; for (let d = first; d <= last; d = addDays(d, 1)) if (isWorkDay(d, id) && employedOn(e, d)) emp++;
       const off = wd - emp;
       if (off > 0 && basic) cut({ label: `Not employed ${d2(off)} of ${wd} (${e.startDate > first ? 'joined ' + fmtD(e.startDate) : 'left ' + fmtD(e.endDate)})`, amount: Math.round(daily * off) });
     }
@@ -1114,7 +1129,7 @@ window.ZenHRModule = function (A) {
           <div class="field"><label class="lbl">Lateness</label><label class="check" style="padding-top:.45rem"><input type="checkbox" id="hs-late" data-bind="hr.set.deductLate" ${d.deductLate ? 'checked' : ''}> Deduct minutes late from pay</label></div>
         </div>
         <div class="hint" style="margin:-.4rem 0 1rem">Payroll automatically deducts absences (a half day counts as half), unpaid leave and days before someone joined or after they left, and adds overtime. Day rate = basic ÷ working days in the month; hourly = day rate ÷ hours per day.</div>
-        <div class="hint" style="margin-bottom:.6rem">Leave only counts working days. Add Mauritius public holidays each year so they aren't counted.</div>
+        <div class="hint" style="margin-bottom:.6rem">This is the company week. Someone who works a different week (e.g. also Saturdays) can have their own on their staff record. Leave only counts working days. Add Mauritius public holidays each year so they aren't counted.</div>
         ${d.holidays.map((h, i) => `<div class="hr-item"><span class="nowrap" style="width:120px">${fmtD(h.date)}</span><span class="grow">${esc(h.name)}</span><button type="button" class="btn btn--danger-ghost btn--sm" data-act="hr-hol-del" data-i="${i}">Remove</button></div>`).join('') || '<div class="small muted">No public holidays added yet.</div>'}
         <div class="row wrap" style="margin-top:.7rem;gap:.5rem;max-width:560px"><input id="hs-hd" class="input" type="date" style="width:170px" value="${esc(d.newHolDate)}" data-bind="hr.set.newHolDate" aria-label="Date"><input id="hs-hn" class="input grow" maxlength="60" placeholder="e.g. Independence Day" value="${esc(d.newHolName)}" data-bind="hr.set.newHolName" aria-label="Holiday name"><button type="button" class="btn btn--ghost" data-act="hr-hol-add">Add</button></div>
       </div></div>
@@ -1230,7 +1245,7 @@ window.ZenHRModule = function (A) {
     'hr-mark'(el) { const id = el.dataset.id, d = H.at.date, cur = markOf(id, d); saveMark(id, d, { s: cur && cur.s === el.dataset.v ? '' : el.dataset.v }); },
     async 'hr-at-all'() {
       const d = H.at.date, marks = {};
-      activeEmps().concat(empList().filter((e) => e.status === 'Left')).filter((e) => employedOn(e, d) && !onLeave(e.id, d) && !markOf(e.id, d)).forEach((e) => {
+      activeEmps().concat(empList().filter((e) => e.status === 'Left')).filter((e) => isWorkDay(d, e.id) && employedOn(e, d) && !onLeave(e.id, d) && !markOf(e.id, d)).forEach((e) => {
         marks[e.id] = Object.assign({ late: 0, ot: 0, note: '' }, (H.att[d] && H.att[d].marks && H.att[d].marks[e.id]) || {}, { s: 'P' }); });
       H.att[d] = H.att[d] || { date: d, marks: {} }; H.att[d].marks = Object.assign({}, H.att[d].marks, marks); render();
       try { await S.db.collection('attendance').doc(d).set({ date: d, marks, updatedAt: now(), updatedBy: S.me.id }, { merge: true }); toast(Object.keys(marks).length + ' marked present.'); } catch (e) { fail(e); }
@@ -1328,6 +1343,8 @@ window.ZenHRModule = function (A) {
   };
   function copyStrings(s) { s.earnings.forEach((x) => { x.amount = String(x.amount); }); s.dependents = String(s.dependents || 0); s.otherReliefs = String(s.otherReliefs || ''); }
   const changes = {
+    'hr-ed-ownweek'(el) { H.ed.ownWeek = !el.checked; H.ed.touched = true; if (H.ed.ownWeek && !H.ed.workDays.length) H.ed.workDays = main().workDays.slice(); render(); },
+    'hr-ed-wd'(el) { const w = Number(el.dataset.v), a = H.ed.workDays; if (el.checked) { if (!a.includes(w)) a.push(w); } else a.splice(a.indexOf(w), 1); H.ed.touched = true; render(); },
     // Register: record a day of leave (sick, local/annual…) instead of an absence. Paid leave isn't deducted.
     'hr-at-leave'(el) { if (el.value) registerLeave(el.dataset.id, H.at.date, el.value); },
     'hr-cell-leave'(el) { const p = H.at.pick; if (p && el.value) { H.at.pick = null; registerLeave(p.id, p.d, el.value); } },
