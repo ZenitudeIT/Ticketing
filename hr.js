@@ -454,7 +454,7 @@ window.ZenHRModule = function (A) {
           <label class="check"><input type="checkbox" id="he-at-${i}" data-bind="${b('allowances.' + i + '.taxable')}" ${a.taxable ? 'checked' : ''}> Taxable</label>
           <button type="button" class="btn btn--danger-ghost btn--sm" data-act="hr-al-del" data-i="${i}">Remove</button></div>`).join('')}
         <button type="button" class="btn btn--ghost btn--sm" data-act="hr-al-add">${icon('plus')} Add allowance</button>
-        <details class="more" ${d.otherReliefs || d.openTY || !d.csg || !d.nsf || !d.prgf || !d.levy ? 'open' : ''}><summary>More tax settings</summary>
+        <details class="more" id="he-more-${esc(d.id || 'new')}" ${d.otherReliefs || d.openTY || !d.csg || !d.nsf || !d.prgf || !d.levy ? 'open' : ''}><summary>More tax settings</summary>
           <div class="g2" style="margin-top:.8rem">
             ${fieldI('he-rel', 'Other yearly reliefs from their EDF (Rs)', b('otherReliefs'), d.otherReliefs, 'inputmode="decimal" placeholder="0"', 'E.g. medical insurance or housing loan interest they claim. Leave empty if none.')}
             <div class="field"><label class="lbl">Contributions that apply</label><div class="row wrap" style="gap:1rem;padding-top:.4rem">
@@ -1049,7 +1049,7 @@ window.ZenHRModule = function (A) {
         </tbody></table>
         <div class="lbl" style="margin-top:.9rem">Paid by Zenitude on top</div>
         <table class="mini"><tbody><tr><td>CSG (${c.csgRateEr}%)</td><td class="num">${money2(c.csgEr)}</td></tr><tr><td>NSF</td><td class="num">${money2(c.nsfEr)}</td></tr><tr><td>Training levy (${c.basic ? '1.5% of basic' : ''})</td><td class="num">${money2(c.levy)}</td></tr><tr><td>PRGF${c.prgf ? ` (on ${money(c.prgfBase)})` : ''}</td><td class="num">${money2(c.prgf)}</td></tr><tr class="tot"><td>Total cost</td><td class="num">${money2(c.employerCost)}</td></tr></tbody></table>
-        <details class="more"><summary>How PAYE was worked out</summary><div class="small t2" style="margin-top:.5rem;line-height:1.7">
+        <details class="more" id="paye-${esc(run.month)}-${esc(id)}"><summary>How PAYE was worked out</summary><div class="small t2" style="margin-top:.5rem;line-height:1.7">
           Month ${c.monthIndex} of the tax year · taxable pay so far ${money(c.cumEmol)}<br>− reliefs so far ${money(c.cumRelief)} (${money(c.annualRelief)} a year × ${c.monthIndex}/12)<br>= chargeable so far ${money(c.cumChargeable)} → tax so far ${money(c.cumTax)}<br>− PAYE already deducted ${money(c.cumPaye - c.paye)} = <b>${money(c.paye)}</b> this month</div></details>
         ${c.warnings.map((w) => `<div class="banner banner--bad small" style="margin-top:.7rem">${esc(w)}</div>`).join('')}
       </div></div></div>`;

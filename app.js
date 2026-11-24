@@ -437,6 +437,8 @@
   // Re-render safely: a redraw can make a focused box lose focus, which fires its
   // change event and asks for another redraw; queue that one instead of nesting it.
   let rendering = false, renderAgain = false;
+  const openDetails = {};
+  document.addEventListener('toggle', (e) => { const el = e.target; if (el && el.tagName === 'DETAILS' && el.id && !rendering) openDetails[el.id] = el.open; }, true);
   function render() {
     if (rendering) { renderAgain = true; return; }
     rendering = true;
@@ -450,6 +452,8 @@
     try { if (fid && typeof ae.selectionStart === 'number') sel = [ae.selectionStart, ae.selectionEnd]; } catch (e) { }
     const y = window.scrollY;
     app.innerHTML = view();
+    // Keep fold-out sections (<details id=…>) the way the person left them.
+    Object.entries(openDetails).forEach(([id, open]) => { const el = document.getElementById(id); if (el && el.tagName === 'DETAILS' && el.open !== open) el.open = open; });
     if (fid) { const el = document.getElementById(fid); if (el) { el.focus({ preventScroll: true }); if (sel) try { el.setSelectionRange(sel[0], sel[1]); } catch (e) { } } }
     if (Math.abs(window.scrollY - y) > 1) window.scrollTo(0, y);
   }
