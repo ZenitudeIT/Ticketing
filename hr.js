@@ -23,12 +23,14 @@ window.ZenHRModule = function (A) {
   const DEFAULT_MAIN = {
     departments: ['Concierge', 'Operations', 'Front office', 'Sales & Marketing', 'Finance', 'HR', 'IT', 'Management'],
     workDays: [1, 2, 3, 4, 5],            // Monday–Friday (0 = Sunday)
-    hoursPerDay: 8,                      // used to price overtime and lateness
+    weeklyHours: 45,                     // Workers' Rights Act s.20/s.25: 45 h a week, a month = 195 h
     deductLate: false,                   // deduct minutes late from pay
-    otRate: 1.5,                         // overtime = hourly rate × this
+    otRate: 1.5,                         // extra hours on a normal day (s.24(4))
+    restRate: 1.5,                       // hours worked on the person's rest day
+    phRate: 2, phAfterRate: 3, phHours: 8, // public holiday: normal hours ×2, after that ×3 (s.24(3))
     holidays: [],                        // [{ date: 'YYYY-MM-DD', name }]
     leaveTypes: [
-      { id: 'annual', name: 'Annual leave', days: 20, paid: true },
+      { id: 'annual', name: 'Annual (local) leave', days: 22, paid: true },   // WRA s.45: 20 days + 2 days
       { id: 'sick', name: 'Sick leave', days: 15, paid: true },
       { id: 'maternity', name: 'Maternity leave', days: 0, paid: true },
       { id: 'paternity', name: 'Paternity leave', days: 0, paid: true },
@@ -41,7 +43,7 @@ window.ZenHRModule = function (A) {
       'Laptop, phone, keys and badge returned', 'Final pay and leave balance settled', 'Certificate of employment issued'],
   };
   const CONTRACTS = ['Permanent', 'Fixed-term', 'Part-time', 'Probation', 'Casual', 'Intern'];
-  const KINDS = { basic: 'Basic salary', allowance: 'Allowance', overtime: 'Overtime', bonus: 'Bonus', other: 'Other' };
+  const KINDS = { basic: 'Basic salary', allowance: 'Allowance', overtime: 'Overtime / extra work', bonus: 'Productivity / attendance bonus', eoy: 'End-of-year bonus', other: 'Other' };
   const LEAVE_ST = ['Pending', 'Approved', 'Rejected', 'Cancelled'];
   const MARKS = { P: 'Present', L: 'Late', H: 'Half day', A: 'Absent' };
   const WEEK = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
@@ -124,7 +126,16 @@ window.ZenHRModule = function (A) {
     const s = year + '-01-01', e = year + '-12-31';
     return leaveArr().filter((l) => l.empId === empId && l.typeId === typeId && l.status === 'Approved').reduce((t, l) => t + daysWithin(l, s, e), 0);
   }
-  function entitlement(e, t) { const o = e && e.leaveDays && e.leaveDays[t.id]; return o != null && o !== '' ? Number(o) : Number(t.days) || 0; }
+  // Workers' Rights Act: full annual (s.45) and sick (s.46) leave after 12 months' continuous employment;
+  // before that, after 6 months, one day for each further month. A per-person allowance overrides this.
+  function monthsServed(e, at) { if (!e || !e.startDate) return 99; const a = parseD(e.startDate), b = parseD(at || today()); let m = (b.getFullYear() - a.getFullYear()) * 12 + b.getMonth() - a.getMonth(); if (b.getDate() < a.getDate()) m--; return m; }
+  function entitlement(e, t) {
+    const o = e && e.leaveDays && e.leaveDays[t.id]; if (o != null && o !== '') return Number(o);
+    const full = Number(t.days) || 0;
+    if (!full || !['annual', 'sick'].includes(t.id)) return full;
+    const m = monthsServed(e);
+    return m >= 12 ? full : Math.min(full, Math.max(0, m - 6));
+  }
   const onLeave = (empId, date) => leaveArr().find((l) => l.empId === empId && l.status === 'Approved' && l.from <= date && l.to >= date);
 
   /* ---------- attendance helpers ---------- */
@@ -134,10 +145,18 @@ window.ZenHRModule = function (A) {
   const markOf = (id, d) => { const m = H.att[d] && H.att[d].marks && H.att[d].marks[id]; return m && m.s ? m : null; };
   // Totals for one person between two dates (working days they were employed).
   function attSummary(id, from, to) {
-    const e = H.emps[id], t = { days: 0, P: 0, L: 0, H: 0, A: 0, leave: 0, unmarked: 0, lateMin: 0, ot: 0 };
+    const e = H.emps[id], t = { days: 0, P: 0, L: 0, H: 0, A: 0, leave: 0, unmarked: 0, lateMin: 0, ot: 0, otDay: 0, otRest: 0, otPH: 0, otPHAfter: 0 };
     if (!e) return t;
+    const mm = main(), phH = Number(mm.phHours) || 8;
     for (let d = from; d <= to; d = addDays(d, 1)) {
-      const m = markOf(id, d); if (m) t.ot += Number(m.ot) || 0;
+      const raw = H.att[d] && H.att[d].marks && H.att[d].marks[id], ot = raw ? Number(raw.ot) || 0 : 0;
+      if (ot) {
+        t.ot += ot;
+        if (holidayName(d)) { t.otPH += Math.min(ot, phH); t.otPHAfter += Math.max(0, ot - phH); }
+        else if (!isWorkDay(d, id)) t.otRest += ot;
+        else t.otDay += ot;
+      }
+      const m = markOf(id, d);
       if (!isWorkDay(d, id) || !employedOn(e, d)) continue;
       t.days++;
       if (onLeave(id, d)) { t.leave++; continue; }
@@ -895,14 +914,19 @@ window.ZenHRModule = function (A) {
     const e = H.emps[id], first = month + '-01', last = monthEnd(month), mm = main();
     const wd = Math.max(1, workingDays(first, last, false, calFor(id)));
     const basic = (s.earnings || []).filter((x) => x.kind === 'basic' && !x.auto).reduce((t, x) => t + num(x.amount), 0);
-    const daily = basic / wd, hourly = daily / (Number(mm.hoursPerDay) || 8);
+    // Workers' Rights Act: hourly rate = monthly wage ÷ 195 (45 h a week, s.25); a day's pay =
+    // monthly wage × 12 ÷ (52 × working days a week), i.e. ÷ 21.67 for 5 days, ÷ 26 for 6 days.
+    // Days not employed (joined/left mid-month) are pro-rated on the working days of that month.
+    const perWeek = Math.max(1, calFor(id).workDays.length), weekly = Number(mm.weeklyHours) || 45;
+    const daily = basic * 12 / (52 * perWeek), hourly = basic * 12 / (52 * weekly), share = basic / wd;
+    let cutTotal = 0;
     const d2 = (n) => money2(n) + ' day' + (n === 1 ? '' : 's');
     // Unpaid time is taken off basic pay (so tax and contributions follow what is actually paid).
-    const cut = (x) => out.earn.push({ label: x.label, amount: -x.amount, kind: 'basic', taxable: true });
+    const cut = (x) => { const a = Math.min(x.amount, Math.max(0, basic - cutTotal)); if (a <= 0) return; cutTotal += a; out.earn.push({ label: x.label, amount: -a, kind: 'basic', taxable: true }); };
     if (e) {
       let emp = 0; for (let d = first; d <= last; d = addDays(d, 1)) if (isWorkDay(d, id) && employedOn(e, d)) emp++;
       const off = wd - emp;
-      if (off > 0 && basic) cut({ label: `Not employed ${d2(off)} of ${wd} (${e.startDate > first ? 'joined ' + fmtD(e.startDate) : 'left ' + fmtD(e.endDate)})`, amount: Math.round(daily * off) });
+      if (off > 0 && basic) cut({ label: `Not employed ${d2(off)} of ${wd} (${e.startDate > first ? 'joined ' + fmtD(e.startDate) : 'left ' + fmtD(e.endDate)})`, amount: Math.round(share * off) });
     }
     const t = out.t = attSummary(id, first, last);
     const missed = t.A + t.H * 0.5;
@@ -910,7 +934,11 @@ window.ZenHRModule = function (A) {
     const unpaid = leaveArr().filter((l) => l.empId === id && l.status === 'Approved' && !ltype(l.typeId).paid).reduce((n, l) => n + daysWithin(l, first, last), 0);
     if (unpaid && basic) cut({ label: `Unpaid leave (${d2(unpaid)})`, amount: Math.round(daily * unpaid) });
     if (mm.deductLate && t.lateMin && basic) cut({ label: `Lateness (${t.lateMin} min)`, amount: Math.round(hourly * t.lateMin / 60) });
-    if (t.ot && basic) out.earn.push({ label: `Overtime (${money2(t.ot)} h × ${mm.otRate ?? 1.5})`, amount: Math.round(hourly * (Number(mm.otRate) || 1.5) * t.ot), kind: 'overtime', taxable: true });
+    const r = (k, dflt) => Number(mm[k]) || dflt, otLine = (h, rate, what) => { if (h > 0 && basic) out.earn.push({ label: `${what} (${money2(h)} h × ${rate})`, amount: Math.round(hourly * rate * h), kind: 'overtime', taxable: true }); };
+    otLine(t.otDay, r('otRate', 1.5), 'Overtime');
+    otLine(t.otRest, r('restRate', 1.5), 'Work on rest day');
+    otLine(t.otPH, r('phRate', 2), 'Public holiday work');
+    otLine(t.otPHAfter, r('phAfterRate', 3), 'Public holiday, after normal hours');
     out.earn.forEach((x) => { x.auto = true; }); out.ded.forEach((x) => { x.auto = true; });
     return out;
   }
@@ -970,7 +998,7 @@ window.ZenHRModule = function (A) {
     ${laterFinal && !final ? `<div class="banner banner--info">${esc(fmtM(laterFinal.month))} is already finalised. Changes here won't update its PAYE until you reopen and re-finalise it.</div>` : ''}
     ${dirty ? `<div class="banner banner--info">You have unsaved changes. <button class="btn btn--link" data-act="hr-run-save">Save now</button></div>` : ''}
     ${missing.length && !final ? `<div class="banner banner--info">${missing.length} current employee${missing.length === 1 ? ' isn\'t' : 's aren\'t'} in this pay run (${esc(missing.slice(0, 3).map((e) => e.fullName).join(', '))}${missing.length > 3 ? '…' : ''}). <button class="btn btn--link" data-act="hr-run-addmissing">Add ${missing.length === 1 ? 'them' : 'them all'}</button></div>` : ''}
-    ${run.month.endsWith('-12') && !final ? `<div class="banner banner--info">December: the end-of-year bonus (1/12 of the year's earnings) is usually paid now. <button class="btn btn--link" data-act="hr-run-bonus">Add it for everyone</button></div>` : ''}
+    ${run.month.endsWith('-12') && !final ? `<div class="banner banner--info">December: the end-of-year bonus (1/12 of the year's earnings, Workers' Rights Act s.54) is due: at least 75% by 5 working days before Christmas, the rest by the last working day of the year. <button class="btn btn--link" data-act="hr-run-bonus">Add it for everyone</button></div>` : ''}
     <div class="kpis">${kp('Staff', t.staff)}${kp('Gross pay', money(t.gross))}${kp('PAYE', money(t.paye))}${kp('CSG + NSF', money(t.csgEe + t.csgEr + t.nsfEe + t.nsfEr))}${kp('Net pay', money(t.net))}${kp('Cost to Zenitude', money(t.employerCost))}</div>
     <div class="panel"><div class="tbl-wrap"><table class="tbl"><thead><tr><th>Employee</th><th class="num">Gross</th><th class="num">PAYE</th><th class="num">CSG</th><th class="num">NSF</th><th class="num">Other</th><th class="num">Net pay</th><th class="num hide-sm">Employer cost</th><th></th></tr></thead><tbody>
       ${ids.map((id) => { const s = run.slips[id], c = slipCalc(run, id); if (!c) return `<tr><td>${esc(s.name)}</td><td colspan="8" class="muted">No rates</td></tr>`;
@@ -1014,13 +1042,13 @@ window.ZenHRModule = function (A) {
         <table class="mini"><tbody>
           <tr><td>Gross pay</td><td class="num">${money2(c.gross)}</td></tr>
           <tr><td>PAYE</td><td class="num">− ${money2(c.paye)}</td></tr>
-          <tr><td>CSG (${c.csgRateEe}% of basic ${money(c.basic)})</td><td class="num">− ${money2(c.csgEe)}</td></tr>
+          <tr><td>CSG (${c.csgRateEe}% of basic ${money(c.basic)}${c.csgBonusEe ? `, + ${money2(c.csgBonusEe)} on the end-of-year bonus` : ''})</td><td class="num">− ${money2(c.csgEe)}</td></tr>
           <tr><td>NSF (1% of ${money(c.nsfBase)})</td><td class="num">− ${money2(c.nsfEe)}</td></tr>
           ${c.otherDed ? `<tr><td>Other deductions</td><td class="num">− ${money2(c.otherDed)}</td></tr>` : ''}
           <tr class="tot"><td>Net pay</td><td class="num">${money2(c.net)}</td></tr>
         </tbody></table>
         <div class="lbl" style="margin-top:.9rem">Paid by Zenitude on top</div>
-        <table class="mini"><tbody><tr><td>CSG (${c.csgRateEr}%)</td><td class="num">${money2(c.csgEr)}</td></tr><tr><td>NSF</td><td class="num">${money2(c.nsfEr)}</td></tr><tr><td>Training levy</td><td class="num">${money2(c.levy)}</td></tr><tr><td>PRGF</td><td class="num">${money2(c.prgf)}</td></tr><tr class="tot"><td>Total cost</td><td class="num">${money2(c.employerCost)}</td></tr></tbody></table>
+        <table class="mini"><tbody><tr><td>CSG (${c.csgRateEr}%)</td><td class="num">${money2(c.csgEr)}</td></tr><tr><td>NSF</td><td class="num">${money2(c.nsfEr)}</td></tr><tr><td>Training levy (${c.basic ? '1.5% of basic' : ''})</td><td class="num">${money2(c.levy)}</td></tr><tr><td>PRGF${c.prgf ? ` (on ${money(c.prgfBase)})` : ''}</td><td class="num">${money2(c.prgf)}</td></tr><tr class="tot"><td>Total cost</td><td class="num">${money2(c.employerCost)}</td></tr></tbody></table>
         <details class="more"><summary>How PAYE was worked out</summary><div class="small t2" style="margin-top:.5rem;line-height:1.7">
           Month ${c.monthIndex} of the tax year · taxable pay so far ${money(c.cumEmol)}<br>− reliefs so far ${money(c.cumRelief)} (${money(c.annualRelief)} a year × ${c.monthIndex}/12)<br>= chargeable so far ${money(c.cumChargeable)} → tax so far ${money(c.cumTax)}<br>− PAYE already deducted ${money(c.cumPaye - c.paye)} = <b>${money(c.paye)}</b> this month</div></details>
         ${c.warnings.map((w) => `<div class="banner banner--bad small" style="margin-top:.7rem">${esc(w)}</div>`).join('')}
@@ -1088,7 +1116,7 @@ window.ZenHRModule = function (A) {
       <div class="payslip__cols">
         <table class="mini"><thead><tr><th>Earnings</th><th class="num">Rs</th></tr></thead><tbody>${s.earnings.map((x) => `<tr><td>${esc(x.label)}${x.taxable === false ? ' <span class="muted small">(not taxed)</span>' : ''}</td><td class="num">${money2(x.amount)}</td></tr>`).join('')}<tr class="tot"><td>Gross pay</td><td class="num">${money2(c.gross)}</td></tr></tbody></table>
         <table class="mini"><thead><tr><th>Deductions</th><th class="num">Rs</th></tr></thead><tbody>
-          <tr><td>Income tax (PAYE)</td><td class="num">${money2(c.paye)}</td></tr><tr><td>CSG (${c.csgRateEe}%)</td><td class="num">${money2(c.csgEe)}</td></tr><tr><td>NSF</td><td class="num">${money2(c.nsfEe)}</td></tr>
+          <tr><td>Income tax (PAYE)</td><td class="num">${money2(c.paye)}</td></tr><tr><td>CSG (${c.csgRateEe}%)${c.csgBonusEe ? ' incl. ' + money2(c.csgBonusEe) + ' on bonus' : ''}</td><td class="num">${money2(c.csgEe)}</td></tr><tr><td>NSF</td><td class="num">${money2(c.nsfEe)}</td></tr>
           ${(s.deductions || []).map((x) => `<tr><td>${esc(x.label)}</td><td class="num">${money2(x.amount)}</td></tr>`).join('')}
           <tr class="tot"><td>Total deductions</td><td class="num">${money2(c.totalDed)}</td></tr></tbody></table>
       </div>
@@ -1106,7 +1134,7 @@ window.ZenHRModule = function (A) {
     allYears().forEach((y) => { const r = ratesFor(y); years[y] = JSON.parse(JSON.stringify(r)); });
     const cur = P.taxYearOf(today().slice(0, 7));
     return {
-      departments: m.departments.slice(), newDept: '', workDays: m.workDays.slice(), hoursPerDay: String(m.hoursPerDay ?? 8), otRate: String(m.otRate ?? 1.5), deductLate: !!m.deductLate, holidays: (m.holidays || []).map((h) => Object.assign({}, h)).sort((a, b) => a.date.localeCompare(b.date)), newHolDate: '', newHolName: '',
+      departments: m.departments.slice(), newDept: '', workDays: m.workDays.slice(), weeklyHours: String(m.weeklyHours ?? 45), otRate: String(m.otRate ?? 1.5), restRate: String(m.restRate ?? 1.5), phRate: String(m.phRate ?? 2), phAfterRate: String(m.phAfterRate ?? 3), phHours: String(m.phHours ?? 8), deductLate: !!m.deductLate, holidays: (m.holidays || []).map((h) => Object.assign({}, h)).sort((a, b) => a.date.localeCompare(b.date)), newHolDate: '', newHolName: '',
       leaveTypes: m.leaveTypes.map((t) => Object.assign({}, t, { days: String(t.days) })), onboardingText: m.onboarding.join('\n'), offboardingText: m.offboarding.join('\n'),
       years, ty: years[cur] ? cur : Object.keys(years).sort().pop(), err: '',
     };
@@ -1124,11 +1152,14 @@ window.ZenHRModule = function (A) {
       <div class="panel"><div class="panel__h"><h2>Working days and public holidays</h2></div><div class="panel__b">
         <div class="row wrap" style="gap:1rem;margin-bottom:1rem">${[1, 2, 3, 4, 5, 6, 0].map((w) => `<label class="check"><input type="checkbox" id="hs-w${w}" data-chg="hr-wd" data-v="${w}" ${d.workDays.includes(w) ? 'checked' : ''}> ${WEEK[w]}</label>`).join('')}</div>
         <div class="row wrap" style="gap:1rem;margin-bottom:1rem">
-          <div class="field" style="width:170px"><label class="lbl" for="hs-hpd">Hours per day</label><input id="hs-hpd" class="input num" inputmode="decimal" value="${esc(d.hoursPerDay)}" data-bind="hr.set.hoursPerDay"></div>
-          <div class="field" style="width:200px"><label class="lbl" for="hs-ot">Overtime rate (× hourly)</label><input id="hs-ot" class="input num" inputmode="decimal" value="${esc(d.otRate)}" data-bind="hr.set.otRate"></div>
+          <div class="field" style="width:150px"><label class="lbl" for="hs-wh">Hours a week</label><input id="hs-wh" class="input num" inputmode="decimal" value="${esc(d.weeklyHours)}" data-bind="hr.set.weeklyHours"></div>
+          <div class="field" style="width:150px"><label class="lbl" for="hs-ot">Overtime ×</label><input id="hs-ot" class="input num" inputmode="decimal" value="${esc(d.otRate)}" data-bind="hr.set.otRate"></div>
+          <div class="field" style="width:150px"><label class="lbl" for="hs-rr">Rest day ×</label><input id="hs-rr" class="input num" inputmode="decimal" value="${esc(d.restRate)}" data-bind="hr.set.restRate"></div>
+          <div class="field" style="width:150px"><label class="lbl" for="hs-ph">Public holiday ×</label><input id="hs-ph" class="input num" inputmode="decimal" value="${esc(d.phRate)}" data-bind="hr.set.phRate"></div>
+          <div class="field" style="width:190px"><label class="lbl" for="hs-pha">Public holiday after ${esc(d.phHours)} h ×</label><input id="hs-pha" class="input num" inputmode="decimal" value="${esc(d.phAfterRate)}" data-bind="hr.set.phAfterRate"></div>
           <div class="field"><label class="lbl">Lateness</label><label class="check" style="padding-top:.45rem"><input type="checkbox" id="hs-late" data-bind="hr.set.deductLate" ${d.deductLate ? 'checked' : ''}> Deduct minutes late from pay</label></div>
         </div>
-        <div class="hint" style="margin:-.4rem 0 1rem">Payroll automatically deducts absences (a half day counts as half), unpaid leave and days before someone joined or after they left, and adds overtime. Day rate = basic ÷ working days in the month; hourly = day rate ÷ hours per day.</div>
+        <div class="hint" style="margin:-.4rem 0 1rem">Workers' Rights Act 2019: hourly rate = monthly basic ÷ 195 (45 h a week, s.25). A day's pay = basic × 12 ÷ (52 × working days a week): ÷ 21.67 for a 5-day week, ÷ 26 for 6 days. Overtime 1.5×; on a public holiday 2× for the normal hours and 3× after (s.24). Payroll applies these automatically to absences, unpaid leave, lateness (if ticked) and the overtime hours in the register.</div>
         <div class="hint" style="margin-bottom:.6rem">This is the company week. Someone who works a different week (e.g. also Saturdays) can have their own on their staff record. Leave only counts working days. Add Mauritius public holidays each year so they aren't counted.</div>
         ${d.holidays.map((h, i) => `<div class="hr-item"><span class="nowrap" style="width:120px">${fmtD(h.date)}</span><span class="grow">${esc(h.name)}</span><button type="button" class="btn btn--danger-ghost btn--sm" data-act="hr-hol-del" data-i="${i}">Remove</button></div>`).join('') || '<div class="small muted">No public holidays added yet.</div>'}
         <div class="row wrap" style="margin-top:.7rem;gap:.5rem;max-width:560px"><input id="hs-hd" class="input" type="date" style="width:170px" value="${esc(d.newHolDate)}" data-bind="hr.set.newHolDate" aria-label="Date"><input id="hs-hn" class="input grow" maxlength="60" placeholder="e.g. Independence Day" value="${esc(d.newHolName)}" data-bind="hr.set.newHolName" aria-label="Holiday name"><button type="button" class="btn btn--ghost" data-act="hr-hol-add">Add</button></div>
@@ -1139,7 +1170,7 @@ window.ZenHRModule = function (A) {
           <label class="check"><input type="checkbox" id="hs-lp-${i}" data-bind="hr.set.leaveTypes.${i}.paid" ${t.paid ? 'checked' : ''}> Paid</label>
           <button type="button" class="btn btn--danger-ghost btn--sm" data-act="hr-lt-del" data-i="${i}" ${usedTypes.has(t.id) ? 'disabled title="Used by leave records"' : ''}>Remove</button></div>`).join('')}
         <button type="button" class="btn btn--ghost btn--sm" data-act="hr-lt-add">${icon('plus')} Add leave type</button>
-        <div class="hint">Check the allowances against the Workers' Rights Act and your contracts. Unpaid leave shows up in payroll so you can deduct it.</div>
+        <div class="hint">Workers' Rights Act 2019: 20 working days' annual leave plus 2 days a year (s.45) and 15 days' sick leave on full pay (s.46), after 12 months' continuous employment. In the first year, after 6 months, one day of each is earned per month; this is applied automatically to the leave types with the ids "annual" and "sick". Unused sick leave carries forward (s.46): set it on the person's record. A medical certificate is needed from the 4th consecutive day of sick leave.</div>
       </div></div>
       <div class="panel"><div class="panel__h"><h2>Checklists</h2><span class="small muted">one item per line</span></div><div class="panel__b"><div class="g2">
         <div class="field"><label class="lbl" for="hs-on">When someone joins</label><textarea id="hs-on" class="input" rows="8" data-bind="hr.set.onboardingText">${esc(d.onboardingText)}</textarea></div>
@@ -1187,7 +1218,7 @@ window.ZenHRModule = function (A) {
     try {
       const at = now(), by = S.me.id, batch = S.db.batch();
       batch.set(S.db.doc('meta/org'), { departments: d.departments, leaveTypes: leave.map(({ id, name, paid }) => ({ id, name, paid })), workDays: d.workDays.slice().sort(), holidays: d.holidays, updatedAt: at, updatedBy: by }, { merge: true });
-      batch.set(S.db.doc('hrSettings/main'), { hoursPerDay: num(d.hoursPerDay) || 8, otRate: num(d.otRate) || 1.5, deductLate: !!d.deductLate, workDays: d.workDays.slice().sort(), holidays: d.holidays, leaveTypes: leave, onboarding: lines(d.onboardingText), offboarding: lines(d.offboardingText), updatedAt: at, updatedBy: by });
+      batch.set(S.db.doc('hrSettings/main'), { weeklyHours: num(d.weeklyHours) || 45, otRate: num(d.otRate) || 1.5, restRate: num(d.restRate) || 1.5, phRate: num(d.phRate) || 2, phAfterRate: num(d.phAfterRate) || 3, phHours: num(d.phHours) || 8, deductLate: !!d.deductLate, workDays: d.workDays.slice().sort(), holidays: d.holidays, leaveTypes: leave, onboarding: lines(d.onboardingText), offboarding: lines(d.offboardingText), updatedAt: at, updatedBy: by });
       batch.set(S.db.doc('hrSettings/payroll'), { years, updatedAt: at, updatedBy: by });
       await batch.commit();
       S.busy = false; H.set = null; toast('HR settings saved.'); go('hr');
@@ -1305,15 +1336,18 @@ window.ZenHRModule = function (A) {
     'hr-slip-remove'(el) { delete H.run.slips[el.dataset.id]; H.slipId = null; render(); },
     'hr-run-addmissing'() { activeEmps().filter((e) => inRun(e, H.run.month) && !H.run.slips[e.id]).forEach((e) => { H.run.slips[e.id] = slipFromEmp(e, H.run.month); copyStrings(H.run.slips[e.id]); }); render(); },
     'hr-run-bonus'() {
-      const run = H.run, y = run.month.slice(0, 4); let n = 0;
+      const run = H.run, y = run.month.slice(0, 4); let n = 0, over = 0;
       Object.entries(run.slips).forEach(([id, s]) => {
-        if (s.earnings.some((x) => x.kind === 'bonus' && /end.of.year|13th/i.test(x.label))) return;
+        if (s.earnings.some((x) => x.kind === 'eoy' || (x.kind === 'bonus' && /end.of.year|13th/i.test(x.label)))) return;
+        const basicNow = s.earnings.filter((x) => x.kind === 'basic' && !x.auto).reduce((t, x) => t + num(x.amount), 0);
+        if (basicNow > 100000) { over++; return; }   // WRA s.54(4)
+        // 1/12 of the year's earnings (s.54): this year's finalised pay runs + this month (auto adjustments included).
         let earned = 0;
-        Object.values(H.runs).forEach((r) => { if (r.month.slice(0, 4) === y && r.month < run.month && r.status === 'final' && r.slips[id]) earned += r.slips[id].earnings.filter((x) => x.kind !== 'bonus').reduce((t, x) => t + (Number(x.amount) || 0), 0); });
-        earned += s.earnings.filter((x) => x.kind !== 'bonus').reduce((t, x) => t + num(x.amount), 0);
-        s.earnings.push({ label: 'End-of-year bonus', amount: String(P.yearEndBonus(earned)), kind: 'bonus', taxable: true }); n++;
+        Object.values(H.runs).forEach((r) => { if (r.month.slice(0, 4) === y && r.month < run.month && r.status === 'final' && r.slips[id]) earned += r.slips[id].earnings.filter((x) => x.kind !== 'eoy').reduce((t, x) => t + (Number(x.amount) || 0), 0); });
+        earned += withAuto(id, run.month, s).earnings.filter((x) => x.kind !== 'eoy').reduce((t, x) => t + num(x.amount), 0);
+        s.earnings.push({ label: 'End-of-year bonus (1/12 of ' + y + ' earnings)', amount: String(P.yearEndBonus(earned)), kind: 'eoy', taxable: true }); n++;
       });
-      toast(n ? `End-of-year bonus added for ${n} ${n === 1 ? 'person' : 'people'}: 1/12 of this year's pay in Zenitude Desk. Check anyone who joined during the year.` : 'Everyone already has an end-of-year bonus line.'); render();
+      toast((n ? `End-of-year bonus added for ${n} ${n === 1 ? 'person' : 'people'}: 1/12 of this year's earnings in Zenitude Desk. Check anyone who joined during the year or was paid outside it.` : 'Everyone already has an end-of-year bonus line.') + (over ? ` ${over} with basic above Rs 100,000 left out (WRA s.54).` : '')); render();
     },
     async 'hr-run-save'() { if (await saveRun()) toast('Pay run saved.'); },
     'hr-run-final'() { const run = H.run; confirm(`Finalise ${fmtM(run.month)}?`, 'Pay is locked and payslips become available. PAYE for later months builds on these figures. You can reopen it if something needs fixing.', 'Finalise', async () => { if (runDirty() && !(await saveRun())) return; finaliseRun(); }); },
@@ -1324,8 +1358,8 @@ window.ZenHRModule = function (A) {
       const run = H.runs[H.run.month], ids = Object.keys(run.slips).sort((a, b) => run.slips[a].name.localeCompare(run.slips[b].name));
       let rows;
       if (el.dataset.k === 'bank') { rows = [['Employee no.', 'Name', 'Bank', 'Account number', 'Net pay']]; ids.forEach((id) => { const s = run.slips[id], c = slipCalc(run, id); rows.push([s.empNo, s.name, s.bankName, s.bankAccount, c.net.toFixed(2)]); }); }
-      else { rows = [['Employee no.', 'Name', 'NIC', 'Basic', 'Gross', 'Taxable', 'PAYE', 'CSG employee', 'CSG employer', 'NSF employee', 'NSF employer', 'Training levy', 'PRGF', 'Net pay']];
-        ids.forEach((id) => { const s = run.slips[id], c = slipCalc(run, id); rows.push([s.empNo, s.name, s.nic, c.basic, c.gross, c.taxable, c.paye, c.csgEe, c.csgEr, c.nsfEe, c.nsfEr, c.levy, c.prgf, c.net]); }); }
+      else { rows = [['Employee no.', 'Name', 'NIC', 'Basic', 'Gross', 'Taxable', 'PAYE', 'CSG employee', 'CSG employer', 'of which CSG on end-of-year bonus (employee)', '(employer)', 'NSF employee', 'NSF employer', 'Training levy', 'PRGF base', 'PRGF', 'Net pay']];
+        ids.forEach((id) => { const s = run.slips[id], c = slipCalc(run, id); rows.push([s.empNo, s.name, s.nic, c.basic, c.gross, c.taxable, c.paye, c.csgEe, c.csgEr, c.csgBonusEe || 0, c.csgBonusEr || 0, c.nsfEe, c.nsfEr, c.levy, c.prgfBase ?? c.basic, c.prgf, c.net]); }); }
       csv(rows, `zenitude-payroll-${run.month}-${el.dataset.k === 'bank' ? 'bank' : 'contributions'}.csv`);
     },
     'hr-slip-step'(el) { const run = H.runs[el.dataset.m], ids = Object.keys(run.slips).sort((a, b) => run.slips[a].name.localeCompare(run.slips[b].name)); const i = ids.indexOf(el.dataset.id); go(`payslip-${el.dataset.m}-${ids[(i + Number(el.dataset.v) + ids.length) % ids.length]}`); },

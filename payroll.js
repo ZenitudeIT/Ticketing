@@ -6,7 +6,13 @@
  * Rates live in the HR settings per tax year (1 July – 30 June) and can be edited
  * on the website when a budget changes them. DEFAULT_RATES below are the 2026-27
  * figures (Finance Act 2026; MRA NSF limits from 1 July 2026).
- * Contributions (CSG, NSF, levy, PRGF) are worked out on basic salary.
+ * Bases (Mauritius):
+ *   CSG, NSF, training levy: basic wage (excludes overtime, bonus and allowances). CSG on the
+ *     end-of-year bonus is worked out separately on the bonus, with its own Rs 50,000 test.
+ *   PRGF: basic wage + productivity/attendance bonus + payment for extra work (overtime);
+ *     not payable when basic is above Rs 200,000.
+ *   NSF is rounded down to the rupee.
+ * Earning kinds: basic, allowance, overtime, bonus (productivity/attendance), eoy (end-of-year bonus), other.
  */
 (function (root) {
   'use strict';
@@ -22,7 +28,8 @@
       // NSF on monthly basic, capped at the ceiling.
       nsf: { ee: 1, er: 2.5, ceiling: 29710 },
       levy: 1.5,      // HRDC training levy, employer, % of basic
-      prgf: 4.5,      // Portable Retirement Gratuity Fund, employer, % of basic
+      prgf: 4.5,      // Portable Retirement Gratuity Fund, employer, % of monthly remuneration
+      prgfMaxBasic: 200000, // no PRGF for a worker whose basic is above this
       minWage: 17745, // national minimum wage per month (warning only)
       note: 'Finance Act 2026 bands; MRA NSF limits from 1 July 2026.',
     },
@@ -77,6 +84,8 @@
     const gross = r2(earnings.reduce((s, e) => s + e.amount, 0));
     const taxable = r2(earnings.filter((e) => e.taxable).reduce((s, e) => s + e.amount, 0));
     const basic = r2(earnings.filter((e) => e.kind === 'basic').reduce((s, e) => s + e.amount, 0));
+    const sumKind = (...k) => r2(earnings.filter((e) => k.includes(e.kind)).reduce((s, e) => s + e.amount, 0));
+    const eoy = sumKind('eoy');
 
     // PAYE — cumulative method
     const m = monthIndex(input.month), frac = m / 12;
@@ -92,13 +101,19 @@
     // Contributions on basic
     const C = R.csg, N = R.nsf;
     const high = basic > C.threshold;
-    const csgEe = input.csg === false ? 0 : rs(basic * (high ? C.eeHigh : C.eeLow) / 100);
-    const csgEr = input.csg === false ? 0 : rs(basic * (high ? C.erHigh : C.erLow) / 100);
-    const nsfBase = Math.min(basic, Number(N.ceiling) || Infinity);
-    const nsfEe = input.nsf === false ? 0 : rs(nsfBase * N.ee / 100);
-    const nsfEr = input.nsf === false ? 0 : rs(nsfBase * N.er / 100);
-    const levy = input.levy === false ? 0 : rs(basic * R.levy / 100);
-    const prgf = input.prgf === false ? 0 : rs(basic * R.prgf / 100);
+    const csgOn = input.csg !== false;
+    const bHigh = eoy > C.threshold;   // the bonus is tested on its own
+    const csgBonusEe = csgOn && eoy > 0 ? rs(eoy * (bHigh ? C.eeHigh : C.eeLow) / 100) : 0;
+    const csgBonusEr = csgOn && eoy > 0 ? rs(eoy * (bHigh ? C.erHigh : C.erLow) / 100) : 0;
+    const csgEe = (csgOn ? rs(Math.max(0, basic) * (high ? C.eeHigh : C.eeLow) / 100) : 0) + csgBonusEe;
+    const csgEr = (csgOn ? rs(Math.max(0, basic) * (high ? C.erHigh : C.erLow) / 100) : 0) + csgBonusEr;
+    const nsfBase = Math.max(0, Math.min(basic, Number(N.ceiling) || Infinity));
+    const nsfEe = input.nsf === false ? 0 : Math.floor(nsfBase * N.ee / 100);
+    const nsfEr = input.nsf === false ? 0 : Math.floor(nsfBase * N.er / 100);
+    const levy = input.levy === false ? 0 : rs(Math.max(0, basic) * R.levy / 100);
+    const prgfBase = Math.max(0, r2(basic + sumKind('overtime', 'bonus')));
+    const prgfOff = input.prgf === false || (R.prgfMaxBasic && basic > R.prgfMaxBasic);
+    const prgf = prgfOff ? 0 : rs(prgfBase * R.prgf / 100);
 
     const otherDed = r2(deductions.reduce((s, d) => s + d.amount, 0));
     const totalDed = r2(paye + csgEe + nsfEe + otherDed);
@@ -107,10 +122,16 @@
     const warnings = [];
     if (basic > 0 && R.minWage && basic < R.minWage) warnings.push('Basic salary is below the national minimum wage (Rs ' + R.minWage.toLocaleString('en') + ' a month) — fine for part-time staff, otherwise check it.');
     if (net < 0) warnings.push('Deductions are more than the pay for this month.');
+    // Workers' Rights Act s.34: other deductions (advances, loans…) in total may not exceed half the pay;
+    // recovering an advance may not exceed one fifth of the basic wage.
+    if (otherDed > gross / 2) warnings.push('Other deductions are more than half of this month\'s pay. The Workers\' Rights Act (s.34) doesn\'t allow that.');
+    const adv = deductions.filter((d) => /advance|avance/i.test(d.label)).reduce((s, d) => s + d.amount, 0);
+    if (adv > basic / 5) warnings.push('Recovering an advance is limited to one fifth of the basic wage per pay period (Workers\' Rights Act s.34).');
+    if (eoy > 0 && basic > 100000) warnings.push('The end-of-year bonus under the Workers\' Rights Act only applies when basic pay is Rs 100,000 or less (s.54). Above that it is a company bonus.');
     return {
       month: input.month, monthIndex: m, gross, taxable, basic,
       paye, csgEe, csgEr, csgRateEe: input.csg === false ? 0 : (high ? C.eeHigh : C.eeLow), csgRateEr: input.csg === false ? 0 : (high ? C.erHigh : C.erLow),
-      nsfEe, nsfEr, nsfBase, levy, prgf, otherDed, totalDed, net, employerCost,
+      nsfEe, nsfEr, nsfBase, levy, prgf, prgfBase, csgBonusEe, csgBonusEr, eoy, otherDed, totalDed, net, employerCost,
       cumEmol, cumRelief, cumChargeable, cumTax, cumPaye: r2((Number(prior.paye) || 0) + paye), annualRelief, warnings,
     };
   }

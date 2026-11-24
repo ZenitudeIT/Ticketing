@@ -15,7 +15,7 @@ function year(basic, allow, dep, start = '2026-07') {
   return { total, first };
 }
 let y = year(60000, 0, 0); eq(y.first.paye, 1833, 'July PAYE 60k'); eq(y.total, 22000, 'year PAYE 60k = annual');
-eq(y.first.csgEe, 1800, 'CSG ee 3% (>50k)'); eq(y.first.csgEr, 3600, 'CSG er 6%'); eq(y.first.nsfEe, 297, 'NSF ee capped'); eq(y.first.nsfEr, 743, 'NSF er capped');
+eq(y.first.csgEe, 1800, 'CSG ee 3% (>50k)'); eq(y.first.csgEr, 3600, 'CSG er 6%'); eq(y.first.nsfEe, 297, 'NSF ee capped'); eq(y.first.nsfEr, 742, 'NSF er capped, rounded down (742.75)');
 eq(y.first.levy, 900, 'levy'); eq(y.first.prgf, 2700, 'PRGF'); eq(y.first.net, 60000 - 1833 - 1800 - 297, 'net');
 y = year(40000, 5000, 1); eq(y.total, Math.round(P.annualTax(45000 * 12 - 110000, R)), 'year PAYE 45k gross, 1 dependent');
 eq(y.first.csgEe, 600, 'CSG ee 1.5% (<=50k)');
@@ -27,4 +27,11 @@ for (const mo of P.taxYearMonths('2026-27')) { const e = [{ label: 'Basic', amou
   const c = P.calcSlip({ rates: R, month: mo, earnings: e, prior }); tot += c.paye; prior = { emol: c.cumEmol, paye: c.cumPaye }; }
 eq(tot, P.annualTax(650000, R), 'bonus year PAYE = annual');
 const low = P.calcSlip({ rates: R, month: '2026-07', earnings: [{ label: 'Basic', amount: 15000, kind: 'basic' }] }); eq(low.warnings.length, 1, 'min wage warning');
+// Mauritius bases
+const c1 = P.calcSlip({ rates: R, month: '2026-11', earnings: [{ label: 'Basic', amount: 30000, kind: 'basic' }, { label: 'Overtime', amount: 2000, kind: 'overtime' }, { label: 'Transport', amount: 1500, kind: 'allowance' }, { label: 'Attendance bonus', amount: 1000, kind: 'bonus' }] });
+eq(c1.csgEe, 450, 'CSG only on basic (not overtime/allowance/bonus)'); eq(c1.prgf, Math.round(33000 * 0.045), 'PRGF on basic + overtime + attendance bonus');
+const c2 = P.calcSlip({ rates: R, month: '2026-12', earnings: [{ label: 'Basic', amount: 30000, kind: 'basic' }, { label: 'End-of-year bonus', amount: 30000, kind: 'eoy' }] });
+eq(c2.csgBonusEe, 450, 'CSG on end-of-year bonus, separately (1.5%)'); eq(c2.csgEe, 900, 'CSG total = salary + bonus'); eq(c2.prgf, 1350, 'no PRGF on end-of-year bonus'); eq(c2.nsfEe, 297, 'no NSF on bonus');
+const c3 = P.calcSlip({ rates: R, month: '2026-11', earnings: [{ label: 'Basic', amount: 250000, kind: 'basic' }] }); eq(c3.prgf, 0, 'no PRGF above Rs 200,000 basic');
+const c4 = P.calcSlip({ rates: R, month: '2026-11', earnings: [{ label: 'Basic', amount: 30000, kind: 'basic' }], deductions: [{ label: 'Salary advance', amount: 7000 }] }); eq(c4.warnings.some((w) => /one fifth/.test(w)), true, 'advance over 1/5 of basic warned');
 console.log(fails ? fails + ' FAILED' : 'All payroll checks passed.'); process.exit(fails ? 1 : 0);

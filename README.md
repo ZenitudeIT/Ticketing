@@ -76,6 +76,14 @@ Nobody else can open them, administrators included, unless they're added to that
   - A finalised run is locked and its payslips can be printed or saved as PDF. It can be reopened.
   - Exports: a bank list (net pay per person) and a contributions file (PAYE, CSG, NSF, levy, PRGF per person).
   - In December it offers the end-of-year bonus (1/12 of the year's pay).
+- **Mauritius law built in** (Workers' Rights Act 2019 and MRA rules):
+  - hourly rate = monthly basic ÷ 195 (s.25); a day's pay = basic × 12 ÷ (52 × working days a week), i.e. ÷ 21.67 (5 days) or ÷ 26 (6 days);
+  - overtime 1.5×; public holiday 2× for the normal hours and 3× after (s.24); rest-day rate set in HR settings;
+  - CSG, NSF and training levy on basic only; CSG on the end-of-year bonus worked out separately; NSF rounded down;
+  - PRGF on basic + productivity/attendance bonus + overtime, none above Rs 200,000 basic;
+  - end-of-year bonus = 1/12 of the year's earnings, for basic up to Rs 100,000 (s.54);
+  - warnings when other deductions exceed half the pay or an advance recovery exceeds a fifth of basic (s.34);
+  - leave: 20 + 2 days annual and 15 days sick after 12 months, earned at 1 day a month from month 6 in the first year (s.45, s.46).
 - **Calculation** (`payroll.js`):
   - PAYE uses the MRA cumulative method across the tax year (1 July – 30 June).
   - CSG, NSF, the training levy and PRGF are worked out on basic salary.
