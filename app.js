@@ -496,7 +496,7 @@
         <header class="top">
           <div class="who">
             <div class="avatar ${isAgent() ? 'avatar--gold' : ''}">${esc(initials(S.me.id))}</div>
-            <div class="who__text"><div class="who__name">${esc(S.me.name)}</div><div class="who__mail">${esc(S.me.email || '')}</div></div>
+            <div class="who__text"><button type="button" class="who__name who__edit" data-act="rename" data-id="${esc(S.me.id)}" title="Change your name">${esc(S.me.name)} <span class="pen" aria-hidden="true">✎</span></button><div class="who__mail">${esc(S.me.email || '')}</div></div>
             <span class="role" title="${esc(roleLabel)}">${esc(roleLabel)}</span>
             <button class="btn btn--ghost btn--sm" data-act="chpw">Password</button>
             <button class="btn btn--ghost btn--sm" data-act="logout">Sign out</button>
@@ -890,7 +890,7 @@
     <div class="panel"><div class="tbl-wrap"><table class="tbl"><thead><tr><th>Person</th><th>Department</th><th>Role</th><th>Desks</th><th>Raised</th><th>Access</th><th></th></tr></thead><tbody>
     ${ids.map((id) => { const u = S.users[id], self = id === S.me.id, off = u.active === false, locked = self || isAdminEmail(u.email);
       const ud = desksOfUser(id);
-      return `<tr><td><div class="row"><div class="avatar ${ud.length ? 'avatar--gold' : ''}">${esc(initials(id))}</div><div><div class="ttl">${esc(u.name)}</div><div class="sub" style="overflow-wrap:anywhere">${esc(u.email || '')}</div>${self || isAdminEmail(u.email) ? `<div class="row" style="gap:.3rem;margin-top:.2rem">${self ? '<span class="tag">You</span>' : ''}${isAdminEmail(u.email) ? '<span class="tag tag--note">Main admin</span>' : ''}</div>` : ''}</div></div></td>
+      return `<tr><td><div class="row"><div class="avatar ${ud.length ? 'avatar--gold' : ''}">${esc(initials(id))}</div><div><div class="ttl">${esc(u.name)}${self || !isAdminEmail(u.email) ? ` <button type="button" class="btn btn--link small" data-act="rename" data-id="${esc(id)}" aria-label="Change ${esc(u.name)}'s name">Edit name</button>` : ''}</div><div class="sub" style="overflow-wrap:anywhere">${esc(u.email || '')}</div>${self || isAdminEmail(u.email) ? `<div class="row" style="gap:.3rem;margin-top:.2rem">${self ? '<span class="tag">You</span>' : ''}${isAdminEmail(u.email) ? '<span class="tag tag--note">Main admin</span>' : ''}</div>` : ''}</div></div></td>
         <td><select id="dp-${esc(id)}" class="input" style="height:32px;min-width:150px" data-chg="dept" data-id="${esc(id)}" aria-label="Department for ${esc(u.name)}">${opt('', '—', u.department || '')}${deptOpts(u.department).map((x) => opt(x, x, u.department || '')).join('')}</select></td>
         <td><select id="ro-${esc(id)}" class="input" style="height:32px;min-width:150px" data-chg="role" data-id="${esc(id)}" ${locked ? 'disabled' : ''} aria-label="Role for ${esc(u.name)}">${Object.entries(ROLE_CHOICES).map(([k, v]) => opt(k, v, u.role === 'admin' ? 'admin' : 'user')).join('')}</select></td>
         <td>${ud.length ? ud.map((x) => `<span class="desk-tag">${esc(deskName(x))}</span>`).join(' ') : '<span class="muted small">None</span>'}</td>
@@ -1095,6 +1095,10 @@
           ${m.url && !m.confirm ? `<a class="btn btn--ghost btn--sm" href="${esc(m.url)}" target="_blank" rel="noopener">Open full size</a><a class="btn btn--primary btn--sm" href="${esc(m.url)}" download="${esc(m.name)}">Download</a>` : ''}</div>
       </div></div>`;
     }
+    if (m.type === 'rename') return `<form data-form="rename">${wrap(m.id === S.me.id ? 'Change your name' : 'Change name',
+      `<div class="field"><label class="lbl" for="m-name">Full name</label><input id="m-name" class="input" maxlength="80" autocomplete="name" value="${esc(m.name)}" data-bind="modal.name"></div>
+       <div class="hint">${m.id === S.me.id ? 'This is how you appear on tickets and to the team.' : `Shown on tickets and to the team. ${esc((S.users[m.id] || {}).email || '')} doesn't change.`}${HR && HR.isHR() ? ' Their HR staff record keeps its own full name: change it there too if needed.' : ''}</div>${m.err ? `<div class="err">${esc(m.err)}</div>` : ''}`,
+      `${cancel}<button class="btn btn--primary" type="submit" ${S.busy ? 'disabled' : ''}>Save</button>`)}</form>`;
     if (m.type === 'chpw') return `<form data-form="chpw">${wrap('Change your password',
       `<div class="field"><label class="lbl" for="m-c">Current password</label><input id="m-c" class="input" type="password" autocomplete="current-password" value="${esc(m.c || '')}" data-bind="modal.c"></div>
        <div class="field"><label class="lbl" for="m-n">New password</label><input id="m-n" class="input" type="password" autocomplete="new-password" value="${esc(m.n || '')}" data-bind="modal.n"></div>
@@ -1168,6 +1172,7 @@
       try { await S.db.collection('users').doc(id).update({ active }); toast(u.name + (active ? ' can sign in again.' : ' has been disabled.')); } catch (e) { fail(e); }
     },
     chpw() { S.modal = { type: 'chpw' }; render(); },
+    rename(el) { const u = S.users[el.dataset.id] || (el.dataset.id === S.me.id ? S.me : null); if (!u) return; S.modal = { type: 'rename', id: el.dataset.id, name: u.name || '', err: '' }; render(); const i = document.getElementById('m-name'); if (i) { i.focus(); i.select(); } },
     'close-modal'() { closeModal(); },
     overlay(el, e) { if (e.target === el) closeModal(); },
     'dash-desk'(el) { S.dashDesk = el.dataset.v; render(); },
@@ -1230,6 +1235,15 @@
     },
   };
   const forms = {
+    async rename() {
+      const m = S.modal, nm = (m.name || '').trim().replace(/\s+/g, ' ');
+      m.err = nm.length < 2 ? 'Enter a name (at least 2 letters).' : nm.length > 80 ? 'That name is too long.' : '';
+      if (m.err) return render();
+      if (nm === ((S.users[m.id] || {}).name || '')) { closeModal(); return; }
+      S.busy = true; render();
+      try { await S.db.collection('users').doc(m.id).update({ name: nm }); S.busy = false; closeModal(); toast('Name changed to ' + nm + '.'); }
+      catch (e) { S.busy = false; m.err = dbMsg(e); render(); }
+    },
     async login() {
       const L = S.draft.login, email = L.email.trim();
       if (!email || !L.p) { L.err = 'Enter your email and password.'; L.info = ''; return render(); }
